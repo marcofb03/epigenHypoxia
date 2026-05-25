@@ -48,13 +48,14 @@ knitr::opts_chunk$set(echo = TRUE)
 #### <del>Co_Hyp_HDACi: Myeloid + Glioma co-culture in Hypoxia + HDAC inhibitor (1% O2) (Full disease rescue)</del>
 #### **Since they did not perform ATAC/H3K27ac profiling on the drug samples, we won't consider the drug at all.**
 #### <span style="color: white;">blank line</span>       
-#### ATAC: 4 condition *(2 replicates each)
-#### CUT&RUN(H3K27ac): 4 condition (*3 replicates each)
-#### **How many replicates should we consider? (8 vs 20 files)**
+#### ATAC: 4 condition *(2 replicates each) -> total of 542.3 Mb 
+#### CUT&RUN(H3K27ac): 4 condition (*3 replicates each) -> total of 1.6 Gb
+#### **How many replicates should we consider? (8 vs 20 sample)**
 
 ### - Retrieving Data
-#### GEO: GSE300330 accession number. Format: tar (of bw, narrowpeak).
+#### GEO: GSE300330 accession number. Format already processed: .bw and .narrowpeak 
 #### https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE300330
+
 
 ## **3. What are the analyses we wish to reproduce, or the questions we wish to answer?**
 
