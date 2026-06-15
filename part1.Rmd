@@ -26,9 +26,38 @@ ah <- AnnotationHub()
 
 ### Peak calling using MACS from .bam files
 ```{bash engine.opts='-l'}
-
 # 1. Extract everything - comment out if you've already extracted it
 tar -xvf hypoxia_data.tar
+```
+
+### Quality Control
+```{bash engine.opts='-l'}
+# 1. Run samtools flagstat on all ATAC files
+mkdir -p qc_reports
+for bam in ATAC/*.bam; do
+    samtools flagstat "$bam" > "qc_reports/$(basename "$bam").flagstat"
+done
+
+# 2. Run samtools flagstat on all CnR files
+for bam in CnR/*.bam; do
+    samtools flagstat "$bam" > "qc_reports/$(basename "$bam").flagstat"
+done
+
+# 3. Compile everything into one visual report
+multiqc qc_reports/ -o qc_final_report/
+```
+
+### How to filter bad quality aligned reads:
+
+The standard "fine-tuning" steps for a BAM file include:
+1) Filter by Mapping Quality (MAPQ): You throw away reads that map poorly or to multiple places in the genome (usually keeping only reads with a score of MAPQ >= 30).
+2) Remove Mitochondrial Reads (Crucial for ATAC-seq): You physically strip out all reads mapping to chromosome M (chrM), as they represent junk background noise.
+3) Remove PCR Duplicates: You mark and remove identical technical copies generated during library prep.
+
+
+### Peak Calling
+
+```{bash engine.opts='-l'}
 
 # 2. Setup output directories
 mkdir -p peaks/atac
@@ -68,27 +97,5 @@ done
 echo "Peak calling complete. All outputs are in the 'peaks/' directory."
 ```
 
-### Quality Control
-```{bash engine.opts='-l'}
-# 1. Run samtools flagstat on all ATAC files
-mkdir -p qc_reports
-for bam in ATAC/*.bam; do
-    samtools flagstat "$bam" > "qc_reports/$(basename "$bam").flagstat"
-done
 
-# 2. Run samtools flagstat on all CnR files
-for bam in CnR/*.bam; do
-    samtools flagstat "$bam" > "qc_reports/$(basename "$bam").flagstat"
-done
-
-# 3. Compile everything into one visual report
-multiqc qc_reports/ -o qc_final_report/
-```
-
-### How to filter bad quality aligned reads:
-
-The standard "fine-tuning" steps for a BAM file include:
-1) Filter by Mapping Quality (MAPQ): You throw away reads that map poorly or to multiple places in the genome (usually keeping only reads with a score of MAPQ >= 30).
-2) Remove Mitochondrial Reads (Crucial for ATAC-seq): You physically strip out all reads mapping to chromosome M (chrM), as they represent junk background noise.
-3) Remove PCR Duplicates: You mark and remove identical technical copies generated during library prep.
 
