@@ -1,0 +1,94 @@
+---
+title: "part1"
+output: html_document
+date: "2026-06-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(Rsubread)      # read alignment
+  library(rtracklayer)   # read/write genomic file formats
+  library(Biostrings)    # handling sequences
+  library(Rfastp)        # read QC/trimming
+  library(epiwraps)
+})
+ah <- AnnotationHub()
+```
+
+```{r}
+#setwd("/Users/marco/Desktop/epigenHypoxia/")
+```
+
+### Peak calling using MACS from .bam files
+```{bash engine.opts='-l'}
+
+# 1. Extract everything - comment out if you've already extracted it
+tar -xvf hypoxia_data.tar
+
+# 2. Setup output directories
+mkdir -p peaks/atac
+mkdir -p peaks/cutnrun
+
+# 3. Define sample groups based on your GSE300330 metadata
+atac_samples=(SRR31003492 SRR31003493 SRR31003494 SRR31003495 SRR31003496 SRR31003497 SRR31003498 SRR31003499)
+cnr_samples=(SRR34076314 SRR34076315 SRR34076316 SRR34076317 SRR34076318 SRR34076319 SRR34076320 SRR34076321 SRR34076322 SRR34076323 SRR34076324 SRR34076325)
+
+# 4. Run Peak Calling for ATAC-seq (with Tn5 shifting)
+echo "Starting ATAC-seq peak calling..."
+for sample in "${atac_samples[@]}"; do
+    echo "Processing ATAC: $sample"
+    macs3 callpeak -t ATAC/${sample}.bam \
+      -f BAMPE \
+      -n ${sample}_ATAC \
+      --outdir peaks/atac \
+      -g hs \
+      --keep-dup all \
+      --nomodel --shift -100 --extsize 200 \
+      -B
+done
+
+# 5. Run Peak Calling for CUT&RUN (Standard narrow peaks)
+echo "Starting CUT&RUN peak calling..."
+for sample in "${cnr_samples[@]}"; do
+    echo "Processing CUT&RUN: $sample"
+    macs3 callpeak -t CnR/${sample}.bam \
+      -f BAMPE \
+      -n ${sample}_CnR \
+      --outdir peaks/cutnrun \
+      -g hs \
+      --keep-dup all \
+      -B
+done
+
+echo "Peak calling complete. All outputs are in the 'peaks/' directory."
+```
+
+### Quality Control
+```{bash engine.opts='-l'}
+# 1. Run samtools flagstat on all ATAC files
+mkdir -p qc_reports
+for bam in ATAC/*.bam; do
+    samtools flagstat "$bam" > "qc_reports/$(basename "$bam").flagstat"
+done
+
+# 2. Run samtools flagstat on all CnR files
+for bam in CnR/*.bam; do
+    samtools flagstat "$bam" > "qc_reports/$(basename "$bam").flagstat"
+done
+
+# 3. Compile everything into one visual report
+multiqc qc_reports/ -o qc_final_report/
+```
+
+### How to filter bad quality aligned reads:
+
+The standard "fine-tuning" steps for a BAM file include:
+1) Filter by Mapping Quality (MAPQ): You throw away reads that map poorly or to multiple places in the genome (usually keeping only reads with a score of MAPQ >= 30).
+2) Remove Mitochondrial Reads (Crucial for ATAC-seq): You physically strip out all reads mapping to chromosome M (chrM), as they represent junk background noise.
+3) Remove PCR Duplicates: You mark and remove identical technical copies generated during library prep.
+
