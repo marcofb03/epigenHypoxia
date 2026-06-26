@@ -1,14 +1,14 @@
 ---
 title: "part1"
 output:
-  html_document: default
   pdf_document: default
+  html_document: default
+  word_document: default
 date: "2026-06-15"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-setwd("/Users/marco/Desktop/epigenHypoxia/")
+knitr::opts_chunk$set( warning = FALSE, message = FALSE)
 ```
 
 ```{r}
@@ -20,14 +20,12 @@ suppressPackageStartupMessages({
   library(Rfastp)        # read QC/trimming
   library(epiwraps)
 })
-ah <- AnnotationHub()
 ```
 
 ## Pre-processing
 
 ### Load aligned .bam files of ATACseq and H3K27ac CUT&RUN
 ```{bash engine.opts='-l', eval=FALSE}
-# Extract everything - comment out if you've already extracted it
 tar -xvf hypoxia_data.tar
 ```
 
@@ -37,23 +35,12 @@ mkdir -p qc_reports
 mkdir -p qc_reports/idxstats
 
 for bam in ATAC/*.bam CnR/*.bam; do
-    echo "Generating QC reports for $(basename "$bam")..."
-    
-    # Flagstat: General mapping stats
     samtools flagstat "$bam" > "qc_reports/$(basename "$bam").flagstat"
-    
-    # Idxstats: Chromosome breakdown (checks if ChrM is really gone)
     samtools idxstats "$bam" > "qc_reports/idxstats/$(basename "$bam").idxstats"
 done
 
 multiqc qc_reports/ -o qc_final_report/
 ```
-
-### How to filter bad quality aligned reads:
-The standard "fine-tuning" steps for a BAM file include:
-1) Filter by Mapping Quality (MAPQ): You throw away reads that map poorly or to multiple places in the genome (usually keeping only reads with a score of MAPQ >= 30).
-2) Remove Mitochondrial Reads (Crucial for ATAC-seq): You physically strip out all reads mapping to chromosome M (chrM), as they represent junk background noise.
-3) Remove PCR Duplicates: You mark and remove identical technical copies generated during library prep.
 
 ### Filtering low quality .bam reads
 ```{bash engine.opts='-l', eval= FALSE}
@@ -61,15 +48,8 @@ mkdir -p filtered_bams qc_reports/dup_metrics
 
 for bam in ATAC/*.bam CnR/*.bam; do
     base=$(basename "$bam" .bam)
-    echo "Processing $base..."
-
-    # Step 1: Filter MAPQ >= 30 and remove ChrM
     samtools view -h -q 30 "$bam" | awk '$1 ~ /^@/ || ($3 != "chrM" && $3 != "MT")' | samtools view -b > "filtered_bams/${base}_temp1.bam"
-
-    # Step 2: Remove PCR Duplicates using samtools (Handles SRR data natively)
     samtools sort -n "filtered_bams/${base}_temp1.bam" | samtools fixmate -m - - | samtools sort - | samtools markdup -r - "filtered_bams/${base}_final.bam"
-
-    # Step 3: Index and clean up
     samtools index "filtered_bams/${base}_final.bam"
     rm "filtered_bams/${base}_temp1.bam"
 done
@@ -77,27 +57,15 @@ done
 
 ### Quality Control on filtered aligned reads (_final.bam files)
 ```{bash engine.opts='-l', eval= FALSE}
-# 1. Create the necessary output folders
 mkdir -p qc_reports_filt/idxstats
 
-# 2. Run both QC metrics in a single loop
 for bam in filtered_bams/*.bam; do
-    echo "Generating QC reports for $(basename "$bam")..."
-    
-    # Flagstat: General mapping stats
     samtools flagstat "$bam" > "qc_reports_filt/$(basename "$bam").flagstat"
-    
-    # Idxstats: Chromosome breakdown (checks if ChrM is really gone)
     samtools idxstats "$bam" > "qc_reports_filt/idxstats/$(basename "$bam").idxstats"
 done
 
-# 3. Compile everything into a final MultiQC report
 multiqc qc_reports_filt/ -o qc_final_report_filt/
 ```
-
-Comment:
-If your multiqc report comes back showing your samples have 80% duplicates, or your control has 20% but your treatment has 70%, do not proceed to differential analysis. You will need to tell the wet-lab scientists to prep the libraries again.
-While 65–80% duplication is physically poor library quality, the fact that all 8 samples are consistently high is the saving grace. The 50% vs. 80% imbalance is fatal because it creates false biological differences. Consistent duplication across the board means you just have a global loss of efficiency, not a biased experiment.
 
 ### Peak calling and bamCoverage
 ```{bash engine.opts='-l', eval=FALSE}
@@ -108,7 +76,6 @@ atac_samples=(SRR31003492 SRR31003493 SRR31003494 SRR31003495 SRR31003496 SRR310
 cnr_samples=(SRR34076314 SRR34076315 SRR34076316 SRR34076317 SRR34076318 SRR34076319 SRR34076320 SRR34076321 SRR34076322 SRR34076324)
 
 # Run Peak Calling for ATAC-seq
-echo "Starting ATAC-seq peak calling..."
 for sample in "${atac_samples[@]}"; do
     echo "Processing ATAC: $sample"
     macs3 callpeak -t "filtered_bams/${sample}_final.bam" \
@@ -122,7 +89,6 @@ for sample in "${atac_samples[@]}"; do
 done
 
 # Run Peak Calling for CUT&RUN H3K27ac
-echo "Starting CUT&RUN peak calling..."
 for sample in "${cnr_samples[@]}"; do
     echo "Processing CUT&RUN: $sample"
     macs3 callpeak -t "filtered_bams/${sample}_final.bam" \
@@ -136,7 +102,6 @@ for sample in "${cnr_samples[@]}"; do
 done
 
 # Run bamCoverage for ATAC-seq
-echo "Starting ATAC-seq bigWig conversion..."
 for sample in "${atac_samples[@]}"; do
     echo "Processing ATAC to bigWig: $sample"
     bamCoverage -b "filtered_bams/${sample}_final.bam" \
@@ -146,7 +111,6 @@ for sample in "${atac_samples[@]}"; do
 done
 
 # Run bamCoverage for CUT&RUN
-echo "Starting CUT&RUN bigWig conversion..."
 for sample in "${cnr_samples[@]}"; do
     echo "Processing CUT&RUN: $sample"
     bamCoverage -b "filtered_bams/${sample}_final.bam" \
@@ -158,10 +122,8 @@ echo "Peak calling and bigWig conversion complete"
 ```
 
 ## Technical Quality Control
-
 ### Quality Control on peak counts of ATACseq (from Peak Calling)
 ```{r}
-# Load peaks + plot per-sample counts
 library(GenomicRanges)
 library(ggplot2)
 
@@ -189,31 +151,18 @@ ggplot(df_atac, aes(x = Run, y = Peak_Counts, color = Group)) +
   geom_point(size = 5) +
       scale_y_continuous(
     breaks = unique(sort(c(seq(0, 50000, 10000), 20000))),
-    limits = c(0, 50000)
-  ) +
+    limits = c(0, 50000) ) +
   scale_color_manual(values = c(
-    "Ctrl_N" = "purple",
-    "CC_N"   = "darkgreen",
-    "Ctrl_H" = "lightblue",
-    "CC_H"   = "red"
-  )) +
+    "Ctrl_N" = "purple", "CC_N"   = "darkgreen",
+    "Ctrl_H" = "lightblue", "CC_H"   = "red" )) +
   theme_minimal() +
-  labs(
-    title = "ATAC Peak Counts by Group (Condition × Treatment)",
-    x = "Sample ID",
-    y = "Number of Peaks",
-    color = "Group"
-  ) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
-    legend.position = "right"
-  )
+  labs( title = "ATAC Peak Counts by Group (Condition × Treatment)",
+    x = "Sample ID", y = "Number of Peaks", color = "Group" ) + 
+  theme( axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"), legend.position = "right")
 ```
 
 ### Quality Control on peak counts of H3K27ac (from Peak Calling)
 ```{r}
-# Load peaks + plot per-sample counts
-
 cnr_peak_files <- list.files("peaks/cutnrun", pattern = "broadPeak$", full.names = TRUE)
 cnr_peaks_list <- lapply(cnr_peak_files, rtracklayer::import)
 
@@ -237,43 +186,21 @@ stopifnot(!any(is.na(df_cnr$Group)))
 ggplot(df_cnr, aes(x = Run, y = Peak_Counts, color = Group)) +
   geom_point(size = 5) +
   scale_color_manual(values = c(
-    "Ctrl_N" = "purple",
-    "CC_N"   = "darkgreen",
-    "Ctrl_H" = "lightblue",
-    "CC_H"   = "red"
-  )) +
+    "Ctrl_N" = "purple", "CC_N"   = "darkgreen",
+    "Ctrl_H" = "lightblue", "CC_H"   = "red" )) +
   theme_minimal() +
-  labs(
-    title = "H3K27ac Broad Peak Counts by Group (Condition × Treatment)",
+  labs( title = "H3K27ac Broad Peak Counts by Group (Condition × Treatment)",
     x = "Sample ID",
     y = "Number of Peaks",
-    color = "Group"
-  ) +
-  theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
-    legend.position = "right"
-  )
+    color = "Group") +
+  theme( axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"), legend.position = "right")
+    
 ```
 
 ## IDR (Irreproducible Discovery Rate) per condition
 ```{bash engine.opts='-l', eval= FALSE}
-'''
-On MacOS
-Create a dedicated Intel-emulated environment and install IDR (in chip M1 Apple doesnt work)
-> CONDA_SUBDIR=osx-64 conda create -n idr_env python=3.9 idr -c bioconda -c conda-forge -y
-> conda activate idr_env
-> conda config --env --set subdir osx-64 #(lock the architecture: prevents Conda from accidentally trying to install M-chip packages)
--> run this command on a .sh file
-'''
 mkdir -p peaks/idr 
 
-#Create pooled files on ATAC
-cat peaks/atac/SRR31003498_ATAC_peaks.narrowPeak peaks/atac/SRR31003499_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_Ctlr_N_pooled_peaks.narrowPeak
-cat peaks/atac/SRR31003496_ATAC_peaks.narrowPeak peaks/atac/SRR31003497_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_Ctlr_H_pooled_peaks.narrowPeak
-cat peaks/atac/SRR31003494_ATAC_peaks.narrowPeak peaks/atac/SRR31003495_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_CC_N_pooled_peaks.narrowPeak
-cat peaks/atac/SRR31003492_ATAC_peaks.narrowPeak peaks/atac/SRR31003493_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_CC_H_pooled_peaks.narrowPeak
-
-# Run IDR for Conditions on ATACseq
 idr --samples SRR31003498_ATAC_peaks.narrowPeak SRR31003499_ATAC_peaks.narrowPeak \
     --peak-list cond_Ctlr_N_pooled_peaks.narrowPeak \
     --input-file-type narrowPeak \
@@ -309,50 +236,30 @@ idr --samples SRR31003492_ATAC_peaks.narrowPeak SRR31003493_ATAC_peaks.narrowPea
 
 ## Filter and Union by IDR to get consensus
 ```{r}
-library(GenomicRanges)
-
 load_idr_peaks <- function(idr_file_path) {
-  # 1. Read the custom 20-column IDR file as a simple table
+
   idr_data <- read.table(idr_file_path, sep="\t", header=FALSE, stringsAsFactors=FALSE)
-  
-  # 2. Name the essential columns (1, 2, 3 are location, 12 is global IDR)
   colnames(idr_data)[1:3] <- c("chr", "start", "end")
   colnames(idr_data)[12] <- "globalIDR"
-  
-  # 3. Filter for Global IDR < 0.05 (-log10 score > 1.301)
   passed_df <- idr_data[idr_data$globalIDR > 1.301, ]
   
-  # 4. Convert cleanly to GRanges object
   passed_peaks <- GenomicRanges::makeGRangesFromDataFrame(passed_df, keep.extra.columns=TRUE)
-  
-  # Drop patches for the IDR objects too
   passed_peaks <- GenomeInfoDb::keepStandardChromosomes(passed_peaks, pruning.mode="coarse")
   
-  return(passed_peaks)
+  return(passed_peaks) 
 }
-
-# Load the filtered IDR peaks for all 4 conditions
 cond_Ctlr_N_idr <- load_idr_peaks("peaks/idr/cond_Ctlr_N_idr.txt")
 cond_Ctlr_H_idr <- load_idr_peaks("peaks/idr/cond_Ctlr_H_idr.txt")
 cond_CC_N_idr <- load_idr_peaks("peaks/idr/cond_CC_N_idr.txt")
 cond_CC_H_idr <- load_idr_peaks("peaks/idr/cond_CC_H_idr.txt")
 
-# Union them together for the master consensus
 atac_consensus <- GenomicRanges::reduce(c(cond_Ctlr_N_idr, cond_Ctlr_H_idr, cond_CC_N_idr, cond_CC_H_idr))
 names(atac_consensus) <- paste0("ATAC_IDR_peak_", seq_along(atac_consensus))
-
-# Saving files
-rtracklayer::export(atac_consensus, "peaks/atac_consensus.bed")
 saveRDS(atac_consensus, "peaks/atac_consensus.rds")
-
-# To load 
-# atac_consensus <- rtracklayer::import("peaks/atac_consensus_intersection.bed")
-# atac_idr_consensus <- readRDS("peaks/atac_idr_consensus.rds")
 ```
 
 ### PCA on ATACseq (from Peak Calling)
 ```{r}
-
 peak_matrix <- sapply(atac_peaks_list, function(x) {
   as.integer(overlapsAny(atac_consensus, x))
 })
@@ -376,66 +283,44 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
     "Ctrl_N" = "purple",
     "CC_N"   = "darkgreen",
     "Ctrl_H" = "lightblue",
-    "CC_H"   = "red"
-  )) +
-  labs(
-    title = "PCA ATACseq",
+    "CC_H"   = "red" )) + 
+  labs(title = "PCA ATACseq",
     x = paste0("PC1: ", var_pct[1], "%"),
     y = paste0("PC2: ", var_pct[2], "%"),
-    color = "Group"
-  ) +
+    color = "Group") +
   theme_bw() +
-  theme(
-    panel.grid = element_blank(),
+  theme( panel.grid = element_blank(),
     plot.title = element_text(face = "bold", hjust = 0.5),
-    legend.position = "right"
-  )
-
+    legend.position = "right")
 ```
 
-### Consensus H3K27ac
+### Consensus H3K27ac by Intersection
 ```{r}
-# Load required libraries
-library(GenomicRanges)
-library(rtracklayer)
 library(GenomeInfoDb)
 
-# 1. Function: Filter for Reproducibility & Clean Chromosomes
 get_replicated_per_cond <- function(file_paths, min_reps = 2) {
+  
   peaks <- lapply(file_paths, rtracklayer::import)
-  
-  peaks <- lapply(peaks, function(p) keepStandardChromosomes(p, pruning.mode="coarse"))   # keep standard chromosomes
-  
-  # Flatten all peaks together
+  peaks <- lapply(peaks, function(p) keepStandardChromosomes(p, pruning.mode="coarse"))  
   unioned <- GenomicRanges::reduce(do.call(c, peaks))
   
-  # Count how many original replicates overlap each flat region
   overlap_counts <- rowSums(sapply(peaks, function(p) {
     GenomicRanges::countOverlaps(unioned, p) > 0
   }))
   
-  # Keep only regions supported by both replicates
   return(unioned[overlap_counts >= min_reps])
 }
-
-# Process each condition separately (Intersection)
 cnr_Ctlr_N <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076321_H3K27ac_peaks.broadPeak", 
                                         "peaks/cutnrun/SRR34076324_H3K27ac_peaks.broadPeak"))
-
 cnr_Ctlr_H <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076319_H3K27ac_peaks.broadPeak", 
                                         "peaks/cutnrun/SRR34076322_H3K27ac_peaks.broadPeak"))
-
 cnr_CC_N <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076317_H3K27ac_peaks.broadPeak", 
                                       "peaks/cutnrun/SRR34076318_H3K27ac_peaks.broadPeak"))
-
 cnr_CC_H <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076314_H3K27ac_peaks.broadPeak", 
                                       "peaks/cutnrun/SRR34076316_H3K27ac_peaks.broadPeak"))
 
-# Build the Master Consensus Map (Union)
 H3K27ac_consensus <- GenomicRanges::reduce(c(cnr_Ctlr_N, cnr_Ctlr_H, cnr_CC_N, cnr_CC_H))
 names(H3K27ac_consensus) <- paste0("H3K27ac_peak_", seq_along(H3K27ac_consensus))
-
-# Export the final map for your differential analysis
 saveRDS(H3K27ac_consensus, "peaks/H3K27ac_consensus.rds")
 ```
 
@@ -467,29 +352,21 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
     "Ctrl_N" = "purple",
     "CC_N"   = "darkgreen",
     "Ctrl_H" = "lightblue",
-    "CC_H"   = "red"
-  )) +
-  labs(
-    title = "PCA H3K27ac",
+    "CC_H"   = "red" )) +
+  labs( title = "PCA H3K27ac",
     x = paste0("PC1: ", var_pct[1], "%"),
     y = paste0("PC2: ", var_pct[2], "%"),
-    color = "Group"
-  ) +
+    color = "Group") +
   theme_bw() +
-  theme(
-    panel.grid = element_blank(),
+  theme( panel.grid = element_blank(),
     plot.title = element_text(face = "bold", hjust = 0.5),
-    legend.position = "right"
-  )
+    legend.position = "right")
 ```
 
 ## Creating atac_count_matrix
-```{r}
-library(GenomicRanges)
+```{r, results = 'hide'}
 library(Rsubread)
-atac_consensus <- readRDS("peaks/atac_consensus.rds")
 
-# Convert GRanges to SAF (Simplified Annotation Format) for Rsubread
 saf <- data.frame(
   GeneID = names(atac_consensus),
   Chr    = as.character(seqnames(atac_consensus)),
@@ -498,15 +375,12 @@ saf <- data.frame(
   Strand = "*"
 )
 
-# Define your aligned BAM files (update paths to your actual mapped BAMs)
 bam_files <- c(
   "filtered_bams/SRR31003498_final.bam", "filtered_bams/SRR31003499_final.bam", # Ctlr_N
   "filtered_bams/SRR31003496_final.bam", "filtered_bams/SRR31003497_final.bam", # Ctlr_H
   "filtered_bams/SRR31003494_final.bam", "filtered_bams/SRR31003495_final.bam", # CC_N
   "filtered_bams/SRR31003492_final.bam", "filtered_bams/SRR31003493_final.bam"  # CC_H
 )
-
-# Count the reads across all peaks for all samples
 counts <- Rsubread::featureCounts(
   files = bam_files,
   annot.ext = saf,
@@ -514,49 +388,32 @@ counts <- Rsubread::featureCounts(
   requireBothEndsMapped = TRUE,
   nthreads = 4
 )
-
-# Extract and format the count matrix
 count_matrix <- counts$counts
 
-# Rename columns to match 2x2 factorial design
 colnames(count_matrix) <- c(
   "Ctlr_N_1", "Ctlr_N_2",
   "Ctlr_H_1",  "Ctlr_H_2",
   "CC_N_1", "CC_N_2",
   "CC_H_1",  "CC_H_2"
 )
-
-# Saving count_matrix
 saveRDS(count_matrix, "peaks/atac_count_matrix.rds")
 ```
 
 ## Creating H3K27ac_count_matrix
-```{r}
-library(GenomicRanges)
-library(Rsubread)
-library(rtracklayer)
-
-h3k27ac_consensus <- readRDS("peaks/h3k27ac_consensus.rds")
-
-# Convert GRanges to SAF (Simplified Annotation Format) for Rsubread
-# Note: When importing from BED, the peak names are stored in the '$name' column
+```{r, results = 'hide'}
 saf_cnr <- data.frame(
-  GeneID = names(h3k27ac_consensus),
-  Chr    = as.character(seqnames(h3k27ac_consensus)),
-  Start  = start(h3k27ac_consensus),
-  End    = end(h3k27ac_consensus),
+  GeneID = names(H3K27ac_consensus),
+  Chr    = as.character(seqnames(H3K27ac_consensus)),
+  Start  = start(H3K27ac_consensus),
+  End    = end(H3K27ac_consensus),
   Strand = "*"
 )
-
-# Define your aligned BAM files for CUT&RUN (using your H3K27ac SRR IDs)
 h3k27ac_bam_files <- c(
   "filtered_bams/SRR34076321_final.bam", "filtered_bams/SRR34076324_final.bam", # Ctlr_N
   "filtered_bams/SRR34076319_final.bam", "filtered_bams/SRR34076322_final.bam", # Ctlr_H
   "filtered_bams/SRR34076317_final.bam", "filtered_bams/SRR34076318_final.bam", # CC_N
   "filtered_bams/SRR34076314_final.bam", "filtered_bams/SRR34076316_final.bam"  # CC_H
 )
-
-# Count the reads across all broad peaks for all samples
 h3k27ac_counts <- Rsubread::featureCounts(
   files = h3k27ac_bam_files,
   annot.ext = saf_cnr,
@@ -564,11 +421,8 @@ h3k27ac_counts <- Rsubread::featureCounts(
   requireBothEndsMapped = TRUE,
   nthreads = 4
 )
-
-# Extract and format the count matrix
 h3k27ac_count_matrix <- h3k27ac_counts$counts
 
-# Rename columns to match 2x2 factorial design
 colnames(h3k27ac_count_matrix) <- c(
   "Ctlr_N_1", "Ctlr_N_2",
   "Ctlr_H_1", "Ctlr_H_2",
@@ -576,36 +430,8 @@ colnames(h3k27ac_count_matrix) <- c(
   "CC_H_1",   "CC_H_2"
 )
 
-# Save the CUT&RUN count matrix
 saveRDS(h3k27ac_count_matrix, "peaks/h3k27ac_count_matrix.rds")
 ```
-
-
-
-
-
-## Explanation of what has been done Creating consensun on ATACseq
-
-ATAC-seq is noisy. A peak appearing in only one replicate is likely a technical artifact. IDR proves that a peak is a genuine, biologically reproducible open chromatin region.kept only the peaks that passed the strict statistical threshold (score > 1.301), and explicitly deleted weird, unplaced chromosomal fragments.You took the clean, validated peaks from all 4 conditions and flattened them together (GenomicRanges::reduce) into a single master list of coordinates. If Control has a peak at chr1:100-200 and Treatment has a peak at chr1:120-220, the computer doesn't know how to compare them. Your consensus step fused them into a single, universal coordinate (chr1:100-220) that will be evaluated across all samples.
-
-Why This is Needed
-In ATAC-seq, peak calling on single files captures both true biological signals (open chromatin) and random technical noise. To confidently compare regions across different biological conditions, you must establish a consensus peakset: a single, highly reliable catalog of genomic regions. The provided pipeline generates two versions of this consensus: one using a simple overlap strategy and a more rigorous one using statistical reproducibility (IDR).
-Detailed Pipeline
-
-2. Chunk 2: Statistical Scoring (IDR Calculation)
-What was done: Assesses peak reliability mathematically using the Irreproducible Discovery Rate (IDR) framework via the command line.
-Methods used:
-idr Tool: Instead of just checking if a peak overlaps, IDR compares the ranking (sorted by p-value, --rank p.value) of peaks between two biological replicates against a pooled reference.
-Scoring: True biological peaks will rank highly in both replicates. Random noise will rank highly in one but poorly in the other. The tool calculates an IDR score for every peak, indicating the probability that the peak is irreproducible, outputting text scores (.txt) and diagnostic charts (.png).
-3. Chunk 3: IDR Filtering and Final Consensus
-What was done: Filters the raw IDR results to create the final, statistically rigorous consensus peakset and saves the data.
-Methods used:
-Data Parsing & Filtering (read.table): Reads the 20-column IDR text files. It targets the "Global IDR" column (Column 12). Since the software outputs this as a -log10 value, filtering for scores > 1.301 directly translates to keeping only peaks with an IDR < 0.05 (a 5% false discovery threshold).
-Format Conversion (makeGRangesFromDataFrame): Converts the filtered text tables back into GenomicRanges objects for genomic math.
-Final Union (reduce): Merges the IDR-passing peaks from all four conditions into the final atac_idr_consensus.
-Export (rtracklayer::export, saveRDS): Saves both the naive-overlap and the IDR-filtered peak sets as .bed files (readable by genome browsers and command-line tools) and .rds files (native R format for instant loading in downstream differential analysis).
-
-
 
 
 
