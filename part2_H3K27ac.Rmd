@@ -24,6 +24,7 @@ suppressPackageStartupMessages({
   library(motifmatchr)
   library(sechm)
   library(BSgenome.Mmusculus.UCSC.mm10)
+  library(TxDb.Mmusculus.UCSC.mm10.knownGene)
   library(limma)
   library(betterChromVAR)
 })
@@ -165,8 +166,6 @@ diff_CC_H_vs_CC_N <- plot_volcano(diff_CC_H_vs_CC_N, "Hypoxia vs Normoxia in Co-
 diff_CC_N_vs_Ctrl_N <- plot_volcano(diff_CC_N_vs_Ctrl_N, "Co vs Monocolture in Normoxia")
 ```
 
-interpret volcano plots cch vs ctrlh !!!!!!!!!!
-
 ```{r}
 # importing differential accessibility results from ATAC-seq analysis
 accessibility_diff_Ctrl_H_vs_Ctrl_N <- readRDS("diff_Ctrl_H_vs_Ctrl_N.rds")
@@ -187,8 +186,6 @@ count_sig(diff_Ctrl_H_vs_Ctrl_N, "Ctrl_H vs Ctrl_N")
 count_sig(diff_CC_N_vs_Ctrl_N,   "CC_N vs Ctrl_N")
 count_sig(diff_CC_H_vs_CC_N,     "CC_H vs CC_N")
 ```
-
-hw4!!!!!!!!!!!!!!!!
 
 # Comparing changes in acetylation to changes in accessibility
 
@@ -262,8 +259,6 @@ regionOverlaps(regions)
 
 The relationship between changes in H3K27ac and changes in accessibility is not clear-cut: we can see that loss of accessibility is linked to deacetylation at H3K27, whereas increased accessibility is linked to both acetylation and deacetylation (acetylation + increased accessibility is a more common combination though).
 
-stats!!!!!!!!!!!!!!!!!
-
 # H3K27ac signal around enhancer regions
 
 Active enhancer peaks are OPEN and HAVE h3k27ac histone modifications, poised enhancers are OPEN but do NOT HAVE h3k27ac modifications, and inactive enhancers are CLOSED and also do NOT HAVE h3k27ac modifications.
@@ -301,7 +296,8 @@ plotEnrichedHeatmaps(extract_signal(enh_up, tracks), trim=0.95, multiScale = FAL
 plotEnrichedHeatmaps(extract_signal(enh_down, tracks), trim=0.95, multiScale = FALSE, axis_name = "0")
 ```
 
-1st plot: accessibility of enhancer candidates increases in CC_H compared to CC_N, but H3K27ac signal tends to decrease. We would expect at least a similar if not higher acetylation level (heatmap indicates that accessibility is often accompanied by acetylation, why not here?) !!!!!!!!!
+1st plot: accessibility of enhancer candidates increases in CC_H compared to CC_N, but H3K27ac signal tends to decrease. We would expect at least a similar if not higher acetylation level (heatmap indicates that accessibility is often accompanied by acetylation, why not here?) 
+
 2nd plot: accessibility of enhancer candidates decreases in CC_H compared to CC_N, and so does H3K27ac signal. Explanation -> enhancers becoming inactive?
 
 ```{r}
@@ -310,9 +306,25 @@ plotEnrichedHeatmaps(extract_signal(enh_up, tracks), cluster_rows = TRUE, show_r
 
 I thought we might see subpopulations where acetylation increases with accessibility but that doesn't seem to be the case.
 
+# H3K27ac signal around genic regions
+
+```{r}
+# importing genic_up and genic_down from part2
+genic_up   <- readRDS("genic_up.rds")
+genic_down <- readRDS("genic_down.rds")
+```
+
+```{r}
+plotEnrichedHeatmaps(extract_signal(genic_up, tracks), trim=0.95, multiScale = FALSE, axis_name = "0")
+```
+
+```{r}
+plotEnrichedHeatmaps(extract_signal(genic_down, tracks), trim=0.95, multiScale = FALSE, axis_name = "0")
+```
+
 # H3K27ac signal around TF motif occurences
 
-Here we investigate the TFs SPI1, IRF8 (enhancer DOWN) and NF-κB (enhancer UP) 
+Here we investigate the TFs SPI1, IRF8 (enhancer DOWN) and NF-κB (enhancer UP)
 
 ```{r}
 get_motifs <- function(motif_name, regions_of_interest, reference = "Mus", genome = BSgenome.Mmusculus.UCSC.mm10) {
@@ -375,6 +387,108 @@ ggplot(profile_df, aes(x = position_bp, y = signal, color = motif)) +
   )
 ```
 
+Here we investigate the TFs NFAC1.1 (enhancer DOWN), FOSL1, FOSL2, JUND, JUN, JUNB, BATF, FOSB (enhancer UP), and KLF4, SP1 (genic UP).
+IRF8 disappeared from the motifs.
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_KLF4 <- extract_signal(get_motifs("KLF4", genic_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_KLF4, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_SP1 <- extract_signal(get_motifs("SP1", genic_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_SP1, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_FOSL1 <- extract_signal(get_motifs("FOSL1", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_FOSL1, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_FOSL2 <- extract_signal(get_motifs("FOSL2", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_FOSL2, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_JUND <- extract_signal(get_motifs("JUND", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_JUND, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_JUN <- extract_signal(get_motifs("JUN", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_JUN, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_JUNB <- extract_signal(get_motifs("JUNB", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_JUNB, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_BATF <- extract_signal(get_motifs("BATF", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_BATF, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_FOSB <- extract_signal(get_motifs("FOSB", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_FOSB, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_NFAC1 <- extract_signal(get_motifs("NFAC1", enh_down), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_NFAC1, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_xxx <- extract_signal(get_motifs("xxx", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_xxx, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
 # Enrichment analysis
 
 Enrichment for H3K27ac gain
@@ -398,22 +512,7 @@ ggplot(head(enrichment_table_acetylation_gain_CC_H_vs_CC_N, 15), aes(fold_enrich
 Plotting H3K27ac signal in regions that gain H3K27ac in CC_H compared to CC_N 
 
 ```{r}
-acetylation_gain_signal_CC_H_vs_CC_N <- signal2Matrix(tracks, acetylation_gain_CC_H_vs_CC_N, extend = 2000)
-
-mat_list_gain <- as.list(assay(acetylation_gain_signal_CC_H_vs_CC_N, "input"))
-
-CC_N_mat_gain <- average_matrices(
-  mat_list_gain[c("H3K27ac_CC_N_1", "H3K27ac_CC_N_2")],
-  "CC_N"
-)
-CC_H_mat_gain <- average_matrices(
-  mat_list_gain[c("H3K27ac_CC_H_1", "H3K27ac_CC_H_2")],
-  "CC_H"
-)
-
-avg_mats_gain <- list(CC_H = CC_H_mat_gain, CC_N = CC_N_mat_gain)
-
-plotEnrichedHeatmaps(avg_mats_gain, trim = 0.95, multiScale = FALSE, axis_name = "0")
+plotEnrichedHeatmaps(extract_signal(acetylation_gain_CC_H_vs_CC_N, tracks), trim=0.95, multiScale = FALSE, axis_name = "0")
 ```
 
 The increase in H3K27ac signal, if present, is marginal. Therefore, it is not necessarily visible in averaged H3K27ac signal plots. The heatmaps may be dominated by the larger number or stronger signal change of regions that lose H3K27ac, causing the overall visual pattern to show reduced acetylation in CC_H compared with CC_N, even though a subset of regions shows coordinated gains in H3K27ac.
@@ -439,22 +538,7 @@ ggplot(head(enrichment_table_acetylation_loss_CC_H_vs_CC_N, 15), aes(fold_enrich
 Plotting H3K27ac signal in regions that lose H3K27ac in CC_H compared to CC_N 
 
 ```{r}
-acetylation_loss_signal_CC_H_vs_CC_N <- signal2Matrix(tracks, acetylation_loss_CC_H_vs_CC_N, extend = 2000)
-
-mat_list_loss <- as.list(assay(acetylation_loss_signal_CC_H_vs_CC_N, "input"))
-
-CC_N_mat_loss <- average_matrices(
-  mat_list_loss[c("H3K27ac_CC_N_1", "H3K27ac_CC_N_2")],
-  "CC_N"
-)
-CC_H_mat_loss <- average_matrices(
-  mat_list_loss[c("H3K27ac_CC_H_1", "H3K27ac_CC_H_2")],
-  "CC_H"
-)
-
-avg_mats_loss <- list(CC_H = CC_H_mat_loss, CC_N = CC_N_mat_loss)
-
-plotEnrichedHeatmaps(avg_mats_loss, trim = 0.95, multiScale = FALSE, axis_name = "0")
+plotEnrichedHeatmaps(extract_signal(acetylation_loss_CC_H_vs_CC_N, tracks), trim=0.95, multiScale = FALSE, axis_name = "0")
 ```
 
 ```{r}
@@ -465,25 +549,15 @@ print(paste0("Mean log2FC among H3K27ac-loss regions: ", mean(acetylation_loss_C
 
 H3K27ac-loss regions are stronger acetylation regions overall, so when they lose signal, the absolute visual decrease is large. H3K27ac-gain regions are lower-signal regions overall, so even if their relative logFC is positive, the absolute increase is visually modest.
 
-# H3K27ac signal around genic regions
+# Annotating differentially acetylated regions
 
 ```{r}
-# # importing enh_up and enh_down from part2
-# enh_down <- readRDS("enh_down.rds")
-# enh_up   <- readRDS("enh_up.rds")
-```
+invisible(capture.output({
+  anno_acetylation_gain <- annotatePeak(acetylation_gain_CC_H_vs_CC_N, tssRegion=c(-2000,2000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db")
+  anno_acetylation_loss <- annotatePeak(acetylation_loss_CC_H_vs_CC_N, tssRegion=c(-2000,2000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db")
+}))
 
-
-
-
-```{r}
-# # plot the signals:
-# plotEnrichedHeatmaps(avg_mats_enh_up, trim=0.95, multiScale = FALSE, axis_name = "0")
-```
-
-```{r}
-# # plot the signals:
-# plotEnrichedHeatmaps(avg_mats_enh_down, trim=0.95, multiScale = FALSE, axis_name = "0")
+plotAnnoBar(c(anno_acetylation_gain, anno_acetylation_loss), title="Genomic Annotation Distribution (acetylation gain vs loss)")
 ```
 
 
@@ -506,10 +580,9 @@ H3K27ac-loss regions are stronger acetylation regions overall, so when they lose
 
 
 
-
-git
 upset plots, overlaps acetylation between conditions to see if there are dynamic changes, acetylation with accessibility
-genic regions acetylation
 connect all three parts, coherent story
-deassuggestions
-!!!!
+interpret volcano plots cch vs ctrlh !!!!!!!!!!
+stats!!!!!!!!!!!!!!!!! for overlaps heatmap
+1st plot in H3K27ac signal around enhancer regions
+maybe just nkfb spi1 and klf4
