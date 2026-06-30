@@ -479,15 +479,7 @@ avg_mats_NFAC1 <- extract_signal(get_motifs("NFAC1", enh_down), tracks, w=5)
 plotEnrichedHeatmaps(avg_mats_NFAC1, trim=0.95, multiScale = FALSE, axis_name = "0")
 # multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
 ```
-
-```{r}
-# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
-avg_mats_xxx <- extract_signal(get_motifs("xxx", enh_up), tracks, w=5) 
-
-# plot the signals:
-plotEnrichedHeatmaps(avg_mats_xxx, trim=0.95, multiScale = FALSE, axis_name = "0")
-# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
-```
+Most important: SPI1, NF-κB, and KLF4 
 
 # Enrichment analysis
 
@@ -557,22 +549,54 @@ invisible(capture.output({
   anno_acetylation_loss <- annotatePeak(acetylation_loss_CC_H_vs_CC_N, tssRegion=c(-2000,2000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db")
 }))
 
-plotAnnoBar(c(anno_acetylation_gain, anno_acetylation_loss), title="Genomic Annotation Distribution (acetylation gain vs loss)")
+plotAnnoBar(list(acetylation_gain = anno_acetylation_gain, acetylation_loss = anno_acetylation_loss), title="Genomic Annotation Distribution")
 ```
 
+Why did we never see acetylation increase when comparing CC_H to CC_N? We mostly focused on distal intergenic regions. Could it be that acetylation gain is rarer in distal intergenic regions compared to others? Let's isolate the differentially acetylated regions that overlap with differentially accessible regions and annotate them.
 
+```{r}
+overlaps <- findOverlaps(acetylation_CC_H_vs_CC_N, accessibility_CC_H_vs_CC_N, ignore.strand = TRUE)
+overlapping_acetylation <- queryHits(overlaps)
+overlapping_accessibility <- subjectHits(overlaps)
 
+# Create logical categories of overlaps
+gain_gain <- acetylation_CC_H_vs_CC_N$group[overlapping_acetylation] == "more acetylated in CCH" &
+  accessibility_CC_H_vs_CC_N$group[overlapping_accessibility] == "more accessible in CCH"
 
+gain_loss <- acetylation_CC_H_vs_CC_N$group[overlapping_acetylation] == "more acetylated in CCH" &
+  accessibility_CC_H_vs_CC_N$group[overlapping_accessibility] == "more accessible in CCN"
 
+loss_gain <- acetylation_CC_H_vs_CC_N$group[overlapping_acetylation] == "more acetylated in CCN" &
+  accessibility_CC_H_vs_CC_N$group[overlapping_accessibility] == "more accessible in CCH"
 
+loss_loss <- acetylation_CC_H_vs_CC_N$group[overlapping_acetylation] == "more acetylated in CCN" &
+  accessibility_CC_H_vs_CC_N$group[overlapping_accessibility] == "more accessible in CCN"
 
+# Extract unique H3K27ac regions from each category
+acetylation_gain_accessibility_gain <- unique(acetylation_CC_H_vs_CC_N[overlapping_acetylation[gain_gain]])
+acetylation_gain_accessibility_loss <- unique(acetylation_CC_H_vs_CC_N[overlapping_acetylation[gain_loss]])
+acetylation_loss_accessibility_gain <- unique(acetylation_CC_H_vs_CC_N[overlapping_acetylation[loss_gain]])
+acetylation_loss_accessibility_loss <- unique(acetylation_CC_H_vs_CC_N[overlapping_acetylation[loss_loss]])
 
+invisible(capture.output({
+  anno_acetylation_gain_accessibility_gain <- annotatePeak(acetylation_gain_accessibility_gain, tssRegion=c(-2000,2000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db")
+  
+  anno_acetylation_gain_accessibility_loss <- annotatePeak(acetylation_gain_accessibility_loss, tssRegion=c(-2000,2000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db")
+  
+  anno_acetylation_loss_accessibility_gain <- annotatePeak(acetylation_loss_accessibility_gain, tssRegion=c(-2000,2000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db")
+  
+  anno_acetylation_loss_accessibility_loss <- annotatePeak(acetylation_loss_accessibility_loss, tssRegion=c(-2000,2000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db")
+}))
 
+annotation_list <- list(acetylation_gain_accessibility_gain = anno_acetylation_gain_accessibility_gain, 
+                 acetylation_gain_accessibility_loss = anno_acetylation_gain_accessibility_loss, 
+                 acetylation_loss_accessibility_gain = anno_acetylation_loss_accessibility_gain, 
+                 acetylation_loss_accessibility_loss = anno_acetylation_loss_accessibility_loss)
 
+plotAnnoBar(annotation_list, title="Genomic Annotation Distribution")
+```
 
-
-
-
+It does not seem like my theory was correct.
 
 
 
@@ -581,8 +605,9 @@ plotAnnoBar(c(anno_acetylation_gain, anno_acetylation_loss), title="Genomic Anno
 
 
 upset plots, overlaps acetylation between conditions to see if there are dynamic changes, acetylation with accessibility
-connect all three parts, coherent story
-interpret volcano plots cch vs ctrlh !!!!!!!!!!
-stats!!!!!!!!!!!!!!!!! for overlaps heatmap
-1st plot in H3K27ac signal around enhancer regions
-maybe just nkfb spi1 and klf4
+interpret volcano plots cch vs ctrlh
+stats for overlaps heatmap
+annotation plot with absolute numbers
+connect files + discussion
+annotate + structure/order code + read literature
+add labels to figures
