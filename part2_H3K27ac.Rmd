@@ -4,27 +4,109 @@ output: html_document
 date: "2026-06-23"
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-setwd("/Users/marco/Desktop/epigenHypoxia/")
+# Set up
+
+```{r}
+suppressPackageStartupMessages({
+  library(edgeR)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
+  library(rGREAT)
+  library(SummarizedExperiment)
+  library(EnrichedHeatmap)
+  library(ComplexHeatmap)
+  library(AnnotationHub)
+  library(MotifDb)
+  library(memes)
+  library(universalmotif)
+  library(ensembldb)
+  library(motifmatchr)
+  library(sechm)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(limma)
+  library(betterChromVAR)
+})
 ```
 
-## Differential Accessibility Analysis with edgeR
 ```{r}
-library(edgeR)
+count_matrix <- readRDS("peaks/h3k27ac_count_matrix.rds")
+consensus <- readRDS("peaks/H3K27ac_consensus.rds")
+tracks <- list.files(path = "peaks", pattern="bw$", full.names = TRUE)
+names(tracks) <- gsub("\\.bw", "", basename(tracks))
+```
 
-count_matrix <- readRDS("peaks/H3K27ac_count_matrix.rds")
-cat("Total consensus peaks:", nrow(count_matrix), "\n")
+```{r}
+h3k27ac_signal <- signal2Matrix(tracks, consensus, extend=2000)
+```
 
-# Define groups based on the column names of atac_count_matrix that are: Ctlr_N_1, Ctlr_N_2, Ctlr_H_1, Ctlr_H_2, CC_N_1, CC_N_2, CC_H_1, CC_H_2
-groups <- factor(c("Ctlr_N", "Ctlr_N", "Ctlr_H", "Ctlr_H", "CC_N", "CC_N", "CC_H", "CC_H"))
+# Plotting all replicates
+
+```{r, fig.height=5, fig.width=15}
+plotEnrichedHeatmaps(h3k27ac_signal)
+```
+
+The heatmap shows H3K27ac signal for all samples and replicates separately. Heatmap intensity represents RPKM-normalized H3K27ac coverage around consensus regions. Replicates seem to agree with each other except for those originating from coculture in hypoxic conditions.
+
+# Averaging per sample
+
+```{r}
+average_matrices <- function(mats, new_name) {
+  avg <- Reduce("+", lapply(mats, as.matrix)) / length(mats)
+  
+  attributes(avg) <- attributes(mats[[1]])
+  attr(avg, "signal_name") <- new_name
+  class(avg) <- class(mats[[1]])
+  
+  avg
+}
+```
+
+```{r}
+mat_list <- as.list(assay(h3k27ac_signal, "input"))
+
+Ctrl_N_mat <- average_matrices(
+  mat_list[c("H3K27ac_Ctrl_N_1", "H3K27ac_Ctrl_N_2")],
+  "Ctrl_N"
+)
+
+Ctrl_H_mat <- average_matrices(
+  mat_list[c("H3K27ac_Ctrl_H_1", "H3K27ac_Ctrl_H_2")],
+  "Ctrl_H"
+)
+
+CC_N_mat <- average_matrices(
+  mat_list[c("H3K27ac_CC_N_1", "H3K27ac_CC_N_2")],
+  "CC_N"
+)
+
+CC_H_mat <- average_matrices(
+  mat_list[c("H3K27ac_CC_H_1", "H3K27ac_CC_H_2")],
+  "CC_H"
+)
+```
+
+```{r}
+avg_mats <- list(CC_H = CC_H_mat, CC_N = CC_N_mat, Ctrl_H = Ctrl_H_mat, Ctrl_N = Ctrl_N_mat)
+plotEnrichedHeatmaps(avg_mats)
+```
+
+Loss of acetylation in hypoxia / co-culture / hypoxia + co-culture
+
+# Differential analysis
+
+```{r}
+# Define groups based on the column names of the count matrix 
+if (!identical(colnames(count_matrix), c("Ctlr_N_1", "Ctlr_N_2", "Ctlr_H_1", "Ctlr_H_2", "CC_N_1", "CC_N_2", "CC_H_1", "CC_H_2"))) {
+  stop("Column names do not match.")
+}
+groups <- factor(c("Ctrl_N", "Ctrl_N", "Ctrl_H", "Ctrl_H", "CC_N", "CC_N", "CC_H", "CC_H"))
 
 # Initialize edgeR object, filter background noise, and normalize
 y <- DGEList(counts = count_matrix, group = groups)
 keep <- filterByExpr(y)
 y <- y[keep, , keep.lib.sizes=FALSE]
 y <- calcNormFactors(y)
-cat("Total tested peaks:", length(keep), "\n")
 
 # Set up the statistical design
 design <- model.matrix(~0 + groups)
@@ -34,46 +116,36 @@ colnames(design) <- levels(groups)
 y <- estimateDisp(y, design)
 fit <- glmQLFit(y, design) # Quasi-Likelihood Negative Binomial
 
-# Define your exact 2x2 experimental questions
+# Define exact experimental questions
 my_contrasts <- makeContrasts(   
-  Ctlr_H_vs_Ctrl_N = Ctlr_H - Ctlr_N, # Baseline hypoxia response -> log2(Ctlr_H) - log2(Ctlr_N) = log2(Ctlr_H/Ctlr_N) = log2FC
-  CC_N_vs_Ctlr_N  = CC_N - Ctlr_N,   # Baseline co-culture response
+  Ctrl_H_vs_Ctrl_N = Ctrl_H - Ctrl_N, # Baseline hypoxia response 
+  CC_N_vs_Ctrl_N  = CC_N - Ctrl_N,   # Baseline co-culture response
   CC_H_vs_CC_N   = CC_H - CC_N,     # Hypoxia effect during co-culture
-  CC_H_vs_Ctrl_H   = CC_H - Ctlr_H,   # Co-culture effect during hypoxia
   levels = design
 )
-#Positive logFC: The peak opened up in Hypoxia.
-#Negative logFC: The peak closed down in Hypoxia.
-#logFC near 0: No change between the two conditions.
 
-# Run the tests for all 4 contrasts
-test1 <- glmQLFTest(fit, contrast=my_contrasts[,"Ctlr_H_vs_Ctrl_N"])
-test2 <- glmQLFTest(fit, contrast=my_contrasts[,"CC_N_vs_Ctlr_N"])
+# Run the tests for all contrasts
+test1 <- glmQLFTest(fit, contrast=my_contrasts[,"Ctrl_H_vs_Ctrl_N"])
+test2 <- glmQLFTest(fit, contrast=my_contrasts[,"CC_N_vs_Ctrl_N"])
 test3 <- glmQLFTest(fit, contrast=my_contrasts[,"CC_H_vs_CC_N"])
-test4 <- glmQLFTest(fit, contrast=my_contrasts[,"CC_H_vs_Ctrl_H"])
+
 # Extract the significant tables for each
-diff_Ctlr_H_vs_Ctrl_N <- topTags(test1, n=Inf, p.value=0.05)$table
-diff_CC_N_vs_Ctlr_N <- topTags(test2, n=Inf, p.value=0.05)$table
-diff_CC_H_vs_CC_N <- topTags(test3, n=Inf, p.value=0.05)$table
-diff_CC_H_vs_Ctrl_H <- topTags(test4, n=Inf, p.value=0.05)$table
+diff_Ctrl_H_vs_Ctrl_N <- topTags(test1, n=Inf, p.value=1, sort.by = "none")$table
+diff_CC_N_vs_Ctrl_N <- topTags(test2, n=Inf, p.value=1, sort.by = "none")$table
+diff_CC_H_vs_CC_N <- topTags(test3, n=Inf, p.value=1, sort.by = "none")$table
 
-cat("Significant DA peaks in Ctlr_H_vs_Ctrl_N:", nrow(diff_Ctlr_H_vs_Ctrl_N), "\n")
-cat("Significant DA peaks in CC_N_vs_Ctlr_N:", nrow(diff_CC_N_vs_Ctlr_N), "\n")
-cat("Significant DA peaks in CC_H_vs_CC_N:", nrow(diff_CC_H_vs_CC_N), "\n")
-cat("Significant DA peaks in CC_H_vs_Ctrl_H:", nrow(diff_CC_H_vs_Ctrl_H), "\n")
+head(diff_Ctrl_H_vs_Ctrl_N)
 
-#head(diff_Ctlr_H_vs_Ctrl_N)
+# logFC > 0 = more acetylated / stronger active regulatory mark
 ```
 
 ## Plot volcano plot of DA peaks
 ```{r}
-library(ggplot2)
-
 plot_volcano <- function(df, plot_title) {
   # Categorize each peak
   df$Significance <- "Not Significant"
-  df$Significance[df$FDR < 0.05 & df$logFC > 1] <- "Up"
-  df$Significance[df$FDR < 0.05 & df$logFC < -1] <- "Down"
+  df$Significance[df$FDR < 0.05 & df$logFC > 0.6] <- "Up"
+  df$Significance[df$FDR < 0.05 & df$logFC < -0.6] <- "Down"
   
   # Plotting volcano
   p <- ggplot(df, aes(x = logFC, y = -log10(FDR), color = Significance)) +
@@ -81,441 +153,363 @@ plot_volcano <- function(df, plot_title) {
     scale_color_manual(values = c("Down" = "blue", "Not Significant" = "gray", "Up" = "red")) +
     theme_minimal() +
     labs(title = plot_title, x = "Log2 Fold Change", y = "-Log10 FDR") +
-    geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+    geom_vline(xintercept = c(-0.6, 0.6), linetype = "dashed") +
     geom_hline(yintercept = -log10(0.05), linetype = "dashed")
   
   print(p)
   return(df)
 }
 
-diff_Ctlr_H_vs_Ctrl_N <- plot_volcano(diff_Ctlr_H_vs_Ctrl_N, "Hypoxia vs Normoxia in monoculture")
-diff_CC_H_vs_CC_N <- plot_volcano(diff_CC_H_vs_CC_N, "Hypoxia vs Normoxia in co-culture")
-diff_CC_N_vs_Ctlr_N <- plot_volcano(diff_CC_N_vs_Ctlr_N, "Co vs monocolture in Normoxia")
-diff_CC_H_vs_Ctrl_H <- plot_volcano(diff_CC_H_vs_Ctrl_H, "Co vs monocolture in Hypoxia")
-
+diff_Ctrl_H_vs_Ctrl_N <- plot_volcano(diff_Ctrl_H_vs_Ctrl_N, "Hypoxia vs Normoxia in Monoculture")
+diff_CC_H_vs_CC_N <- plot_volcano(diff_CC_H_vs_CC_N, "Hypoxia vs Normoxia in Co-Culture")
+diff_CC_N_vs_Ctrl_N <- plot_volcano(diff_CC_N_vs_Ctrl_N, "Co vs Monocolture in Normoxia")
 ```
 
-## Plot Veen diagram (absolute values)
+interpret volcano plots cch vs ctrlh !!!!!!!!!!
+
 ```{r}
-library(limma)
-
-# passing the original DGELRT objects
-results_mat <- cbind(
-  Ctlr_H_vs_Ctrl_N = decideTests(test1, p.value = 0.05, lfc = 1),
-  CC_N_vs_Ctlr_N     = decideTests(test2, p.value = 0.05, lfc = 1),
-  CC_H_vs_CC_N   = decideTests(test3, p.value = 0.05, lfc = 1),
-  CC_H_vs_Ctrl_H   = decideTests(test4, p.value = 0.05, lfc = 1)
-)
-
-par(mar = c(4, 4, 8, 4), cex = 0.7)  # Increase top margin, shrink text
-vennDiagram(results_mat, 
-            include = c("up", "down"), 
-            counts.col = c("blue", "red"),
-            circle.col = c("green", "purple", "black", "red"),
-            main = "All conditions overlap", 
-            cex.main = 2.5) 
-
-# -- COMBINATIONS
-
-# Does hypoxia open/close the same peaks in monoculture vs. co-culture?
-results_hypoxia <- cbind(
-  Hypoxia_Monoculture = decideTests(test1, p.value = 0.05, lfc = 1), # Ctlr_H vs Ctlr_N
-  Hypoxia_CoCulture   = decideTests(test3, p.value = 0.05, lfc = 1)  # CC_H vs CC_N
-)
-
-# Does being in co-culture change accessibility in the same way under normoxia AND hypoxia?
-results_coculture <- cbind(
-  CoCulture_Normoxia = decideTests(test2, p.value = 0.05, lfc = 1), # CC_N vs Ctlr_N
-  CoCulture_Hypoxia  = decideTests(test4, p.value = 0.05, lfc = 1)  # CC_H vs Ctlr_H
-)
-
-# Are there peaks that respond to BOTH hypoxia AND co-culture simultaneously?
-results_synergy <- cbind(
-  Hypoxia_Effect      = decideTests(test1, p.value = 0.05, lfc = 1), # Ctlr_H vs Ctlr_N
-  CoCulture_Hypoxia   = decideTests(test4, p.value = 0.05, lfc = 1)  # CC_H vs Ctlr_H
-)
-
-par(mar = c(4, 4, 8, 4), cex = 0.7) 
-
-# 1. Hypoxia Response
-vennDiagram(results_hypoxia, 
-            include = c("up", "down"), 
-            counts.col = c("blue", "red"),
-            names = c("Hypoxia_Monoculture", "Hypoxia_CoCulture"),
-            main = "Hypoxia Response", 
-            cex.main = 2.5)
-
-# 2. Co-culture Effect
-vennDiagram(results_coculture, 
-            include = c("up", "down"), 
-            counts.col = c("blue", "red"),
-            names = c("CoCulture_Normoxia", "CoCulture_Hypoxia"), 
-            main = "Co-culture Effect", 
-            cex.main = 2.5)
-
-# 3. Synergy
-vennDiagram(results_synergy, 
-            include = c("up", "down"), 
-            counts.col = c("blue", "red"),
-            names = c("Hypoxia_Effect", "CoCulture_Hypoxia"), 
-            main = "Synergy Analysis", 
-            cex.main = 2.5)
+# importing differential accessibility results from ATAC-seq analysis
+accessibility_diff_Ctrl_H_vs_Ctrl_N <- readRDS("diff_Ctrl_H_vs_Ctrl_N.rds")
+accessibility_diff_CC_N_vs_Ctrl_N   <- readRDS("diff_CC_N_vs_Ctrl_N.rds")
+accessibility_diff_CC_H_vs_CC_N     <- readRDS("diff_CC_H_vs_CC_N.rds")
+accessibility_consensus_kept        <- readRDS("accessibility_consensus_kept.rds")
 ```
 
-#### In these plots, **blue numbers (up)** represent chromatin regions that significantly opened (positive logFC), and **red numbers (down)** represent regions that significantly closed (negative logFC). The large numbers at the bottom right indicate peaks that did not significantly change in either condition.
-
-### **1. Hypoxia Response**
-
-**Question Answered:** How does low oxygen change microglial chromatin, and does the presence of glioma cells change that response?
-
-* **Intersection (554 up, 246 down):** The "core hypoxia signature." These peaks consistently open or close in response to hypoxia, whether the microglia are alone or with glioma cells.
-* **Left Circle Unique (610 up, 479 down):** Peaks that only change when microglia experience hypoxia in isolation.
-* **Right Circle Unique (1833 up, 838 down):** Peaks that only change when microglia experience hypoxia *while interacting with glioma*.
-* **Conclusion:** Co-culture massively amplifies the hypoxia response. Glioma cells prime the microglia to undergo a much broader and more aggressive chromatin remodeling under hypoxic stress than they would alone.
-
-### **2. Co-culture Effect**
-
-**Question Answered:** How does physical interaction with glioma cells alter microglial chromatin, and does oxygen level dictate this interaction?
-
-* **Intersection (763 up, 148 down):** The "core glioma interaction signature." These peaks open or close simply because the tumor is present, regardless of oxygen availability.
-* **Left Circle Unique (114 up, 226 down):** Changes triggered by glioma contact strictly in normal oxygen (normoxia).
-* **Right Circle Unique (2527 up, 1240 down):** Changes triggered by glioma contact strictly under hypoxic stress.
-* **Conclusion:** Hypoxia acts as a powerful catalyst for tumor-microglia communication. Interaction with the tumor in a hypoxic environment unlocks thousands of chromatin regions that remain entirely dormant during interaction in a well-oxygenated environment.
-
-### **3. Synergy Analysis**
-
-**Question Answered:** Are the peaks driven purely by hypoxia the exact same peaks driven by adding glioma cells into a hypoxic environment?
-
-* **Intersection (33 up, 23 down):** Almost zero overlap.
-* **Conclusion:** The combination of hypoxia and glioma interaction does not just "double down" on the standard hypoxia response. Adding glioma cells into a hypoxic environment activates an entirely distinct epigenomic program that is completely different from the baseline hypoxia response.
-
-## Genomic Annotation Distribution Across Conditions
 ```{r}
-library(ChIPseeker)
-library(TxDb.Mmusculus.UCSC.mm10.knownGene)
-library(org.Mm.eg.db)
+count_sig <- function(df, name) {
+  up   <- sum(df$Significance == "Up")
+  down <- sum(df$Significance == "Down")
+  total <- sum(up, down)
+  cat(name, "— Up:", up, "| Down:", down, "| Total: ", total, "\n")
+}
 
-# Load consensus peaks coordinates
-consensus_peaks <- readRDS("peaks/H3K27ac_consensus.rds")
+count_sig(diff_Ctrl_H_vs_Ctrl_N, "Ctrl_H vs Ctrl_N")
+count_sig(diff_CC_N_vs_Ctrl_N,   "CC_N vs Ctrl_N")
+count_sig(diff_CC_H_vs_CC_N,     "CC_H vs CC_N")
+```
 
+hw4!!!!!!!!!!!!!!!!
 
-# Extract the coordinate features for each contrast (FDR < 0.05, |logFC| > 1)
-get_granges <- function(diff_table, consensus) {
+# Comparing changes in acetylation to changes in accessibility
+
+```{r}
+# filtering consensus sequences to keep only those that are relevant for differential acetylation analysis
+if (!identical(rownames(count_matrix), names(consensus))) {
+  stop("Row order does not match between count_matrix and consensus.")
+}
+consensus_kept <- consensus[keep]
+
+# reordering accessibility_consensus_kept
+accessibility_consensus_kept <- accessibility_consensus_kept[
+  rownames(accessibility_diff_CC_H_vs_CC_N)
+]
+
+# This function takes the differential analysis output table and attaches its results to the respective genomic coordinates
+make_diff_granges <- function(edgeR_table, consensus_kept) {
+  gr <- consensus_kept
   
-  # Filter for significant rows
-  sig_peaks <- rownames(diff_table)[abs(diff_table$logFC) > 1 & diff_table$FDR < 0.05]
+  mcols(gr)$logFC  <- edgeR_table$logFC
+  mcols(gr)$logCPM <- edgeR_table$logCPM
+  mcols(gr)$PValue <- edgeR_table$PValue
+  mcols(gr)$FDR    <- edgeR_table$FDR
   
-  # Map back to GRanges object
-  if ("name" %in% colnames(mcols(consensus))) {
-    return(consensus[consensus$name %in% sig_peaks])
-  } else {
-    return(consensus[names(consensus) %in% sig_peaks])
+  gr
+}
+
+# converting the differential analysis output to GRanges
+acetylation_Ctrl_H_vs_Ctrl_N <- make_diff_granges(
+  diff_Ctrl_H_vs_Ctrl_N,
+  consensus_kept
+)
+
+acetylation_CC_N_vs_Ctrl_N <- make_diff_granges(
+  diff_CC_N_vs_Ctrl_N,
+  consensus_kept
+)
+
+acetylation_CC_H_vs_CC_N <- make_diff_granges(
+  diff_CC_H_vs_CC_N,
+  consensus_kept
+)
+
+accessibility_CC_H_vs_CC_N <- make_diff_granges(
+  accessibility_diff_CC_H_vs_CC_N,
+  accessibility_consensus_kept
+)
+```
+
+```{r}
+acetylation_Ctrl_H_vs_Ctrl_N <- acetylation_Ctrl_H_vs_Ctrl_N[acetylation_Ctrl_H_vs_Ctrl_N$FDR < 0.05 & abs(acetylation_Ctrl_H_vs_Ctrl_N$logFC) > 0.6]
+acetylation_CC_N_vs_Ctrl_N <- acetylation_CC_N_vs_Ctrl_N[acetylation_CC_N_vs_Ctrl_N$FDR < 0.05 & abs(acetylation_CC_N_vs_Ctrl_N$logFC) > 0.6]
+acetylation_CC_H_vs_CC_N <- acetylation_CC_H_vs_CC_N[acetylation_CC_H_vs_CC_N$FDR < 0.05 & abs(acetylation_CC_H_vs_CC_N$logFC) > 0.6]
+
+accessibility_CC_H_vs_CC_N <- accessibility_CC_H_vs_CC_N[accessibility_CC_H_vs_CC_N$FDR < 0.05 & abs(accessibility_CC_H_vs_CC_N$logFC) > 0.6]
+```
+
+```{r, fig.height=6, fig.width=7}
+# adding group labels:
+acetylation_CC_H_vs_CC_N$group = ifelse(acetylation_CC_H_vs_CC_N$logFC > 0, "more acetylated in CCH", "more acetylated in CCN")
+accessibility_CC_H_vs_CC_N$group = ifelse(accessibility_CC_H_vs_CC_N$logFC > 0, "more accessible in CCH", "more accessible in CCN")
+
+regions <- list(Acetylation_with_hypoxia_in_CC = acetylation_CC_H_vs_CC_N[acetylation_CC_H_vs_CC_N$group == "more acetylated in CCH"], 
+                Deacetylation_with_hypoxia_in_CC = acetylation_CC_H_vs_CC_N[acetylation_CC_H_vs_CC_N$group == "more acetylated in CCN"], 
+                Accessibility_with_hypoxia_in_CC = accessibility_CC_H_vs_CC_N[accessibility_CC_H_vs_CC_N$group == "more accessible in CCH"],
+                Inaccessibility_with_hypoxia_in_CC = accessibility_CC_H_vs_CC_N[accessibility_CC_H_vs_CC_N$group == "more accessible in CCN"])
+
+# visualizing overlaps between accessible/acetylated regions using a heatmap of overlaps:
+regionOverlaps(regions)
+```
+
+The relationship between changes in H3K27ac and changes in accessibility is not clear-cut: we can see that loss of accessibility is linked to deacetylation at H3K27, whereas increased accessibility is linked to both acetylation and deacetylation (acetylation + increased accessibility is a more common combination though).
+
+stats!!!!!!!!!!!!!!!!!
+
+# H3K27ac signal around enhancer regions
+
+Active enhancer peaks are OPEN and HAVE h3k27ac histone modifications, poised enhancers are OPEN but do NOT HAVE h3k27ac modifications, and inactive enhancers are CLOSED and also do NOT HAVE h3k27ac modifications.
+
+```{r}
+# importing enh_up and enh_down from part2
+enh_down <- readRDS("enh_down.rds")
+enh_up   <- readRDS("enh_up.rds")
+```
+
+```{r}
+extract_signal <- function(regions_of_interest, tracks, extend=2000, w = NULL) {
+  if (!(class(regions_of_interest) == "GRanges")) {
+    regions_of_interest <- makeGRangesFromDataFrame(regions_of_interest, keep.extra.columns=TRUE)
   }
+  
+  # we extract signals around regions of interest
+  regions_of_interest_signal <- signal2Matrix(tracks, regions_of_interest, extend=extend, w=w)
+  
+  # averaging between replicates
+  mat_list <- as.list(assay(regions_of_interest_signal, "input"))
+  
+  CC_N_mat <- average_matrices(mat_list[c("H3K27ac_CC_N_1", "H3K27ac_CC_N_2")], "CC_N")
+  
+  CC_H_mat <- average_matrices(mat_list[c("H3K27ac_CC_H_1", "H3K27ac_CC_H_2")], "CC_H")
+  
+  avg_mats <- list(CC_H = CC_H_mat, CC_N = CC_N_mat)
+  
+  return(avg_mats)
+  }
+```
+
+```{r}
+plotEnrichedHeatmaps(extract_signal(enh_up, tracks), trim=0.95, multiScale = FALSE, axis_name = "0")
+plotEnrichedHeatmaps(extract_signal(enh_down, tracks), trim=0.95, multiScale = FALSE, axis_name = "0")
+```
+
+1st plot: accessibility of enhancer candidates increases in CC_H compared to CC_N, but H3K27ac signal tends to decrease. We would expect at least a similar if not higher acetylation level (heatmap indicates that accessibility is often accompanied by acetylation, why not here?) !!!!!!!!!
+2nd plot: accessibility of enhancer candidates decreases in CC_H compared to CC_N, and so does H3K27ac signal. Explanation -> enhancers becoming inactive?
+
+```{r}
+plotEnrichedHeatmaps(extract_signal(enh_up, tracks), cluster_rows = TRUE, show_row_dend=TRUE)
+```
+
+I thought we might see subpopulations where acetylation increases with accessibility but that doesn't seem to be the case.
+
+# H3K27ac signal around TF motif occurences
+
+Here we investigate the TFs SPI1, IRF8 (enhancer DOWN) and NF-κB (enhancer UP) 
+
+```{r}
+get_motifs <- function(motif_name, regions_of_interest, reference = "Mus", genome = BSgenome.Mmusculus.UCSC.mm10) {
+  if (!(class(regions_of_interest) == "GRanges")) {
+    regions_of_interest <- makeGRangesFromDataFrame(regions_of_interest, keep.extra.columns=TRUE)
+  }
+  
+  # obtaining the motif sequence  
+  motif_seq <- MotifDb::query(MotifDb, c(motif_name, reference))[[1]]
+  motif_seq_converted <- convert_motifs(motif_seq, class="TFBSTools-PFMatrix")
+  
+  # find motif matches across background
+  motif <- motifmatchr::matchMotifs(pwms = motif_seq_converted, subject = regions_of_interest, genome = genome, out="positions", p.cutoff=1e-5)[[1]]
+  return(motif)
+}
+```
+
+```{r}
+# we extract signals around the motif occurences, zoom in to 2000bp around the motif centers, in windows of 5bp
+avg_mats_SPI1 <- extract_signal(get_motifs("SPI1", enh_down), tracks, w=5) 
+avg_mats_IRF8 <- extract_signal(get_motifs("IRF8", enh_down), tracks, w=5) 
+avg_mats_NFKB <- extract_signal(get_motifs("NFKB1", enh_up), tracks, w=5) 
+
+# plot the signals:
+plotEnrichedHeatmaps(avg_mats_SPI1, trim=0.95, multiScale = FALSE, axis_name = "0")
+plotEnrichedHeatmaps(avg_mats_IRF8, trim=0.95, multiScale = FALSE, axis_name = "0")
+plotEnrichedHeatmaps(avg_mats_NFKB, trim=0.95, multiScale = FALSE, axis_name = "0")
+# multiScale = TRUE because multiScale = FALSE would simply show a global decrease in acetylation signal
+```
+
+Plotting aggregated signal
+
+```{r}
+get_profile <- function(mat, motif_name, extend = 2000, w = 5) {
+  profile <- colMeans(as.matrix(mat), na.rm = TRUE)
+  data.frame(
+    position_bp = seq(-extend, extend - w, by = w),
+    signal = profile,
+    motif = motif_name
+  )
 }
 
-# Generate GRanges for comparisons
-gr_CC   <- get_granges(diff_CC_N_vs_Ctlr_N, consensus_peaks)
-gr_Hyp  <- get_granges(diff_Ctlr_H_vs_Ctrl_N, consensus_peaks)
-gr_CCHyp <- get_granges(diff_CC_H_vs_CC_N, consensus_peaks)
-
-txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
-
-# Annotate genomic features
-anno_CC    <- annotatePeak(gr_CC, tssRegion=c(-2000, 2000), TxDb=txdb, annoDb="org.Mm.eg.db")
-anno_Hyp   <- annotatePeak(gr_Hyp, tssRegion=c(-2000, 2000), TxDb=txdb, annoDb="org.Mm.eg.db")
-anno_CCHyp <- annotatePeak(gr_CCHyp, tssRegion=c(-2000, 2000), TxDb=txdb, annoDb="org.Mm.eg.db")
-
-# Plot combined distributions to recreate Figure 5B
-plotAnnoBar(list(CC=anno_CC, CC_Hyp=anno_CCHyp, Hyp=anno_Hyp), 
-            title="Genomic Annotation Distribution Across Conditions")
-```
-
-
-### Finding SYNERGISTIC-peaks associated genes
-```{r}
-# Get the row index names for the overlapping peaks
-up_synergy_ids <- rownames(results_synergy)[results_synergy[, 1] == 1 & results_synergy[, 2] == 1]
-down_synergy_ids <- rownames(results_synergy)[results_synergy[, 1] == -1 & results_synergy[, 2] == -1]
-
-# Map IDs back to your consensus genomic coordinates object
-gr_syn_up   <- consensus_peaks[names(consensus_peaks) %in% up_synergy_ids]
-gr_syn_down <- consensus_peaks[names(consensus_peaks) %in% down_synergy_ids]
-
-txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
-
-anno_syn_up   <- annotatePeak(gr_syn_up, tssRegion=c(-2000, 2000), TxDb=txdb, annoDb="org.Mm.eg.db")
-#anno_syn_down <- annotatePeak(gr_syn_down, tssRegion=c(-2000, 2000), TxDb=txdb, annoDb="org.Mm.eg.db") It's 0
-
-# Convert annotations to standard data frames
-df_syn_up   <- as.data.frame(anno_syn_up)
-#df_syn_down <- as.data.frame(anno_syn_down)
-
-# Extract unique gene symbols 
-genes_up   <- unique(df_syn_up$SYMBOL)
-#genes_down <- unique(df_syn_down$SYMBOL)
-
-# Print clean lists to your console
-cat("--- GENES NEXT TO SYNERGISTIC OPENING PEAKS (33) ---\n")
-print(genes_up)
-
-cat("\n--- GENES NEXT TO SYNERGISTIC CLOSING PEAKS (23) ---\n")
-print("0")
-```
-
-## Venn diagram - considering only promoters peak
-```{r}
-library(ChIPseeker)
-library(TxDb.Mmusculus.UCSC.mm10.knownGene)
-library(org.Mm.eg.db)
-
-# Annotate ALL consensus peaks first
-txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
-anno_all <- annotatePeak(consensus_peaks, tssRegion=c(-2000, 2000), TxDb=txdb, annoDb="org.Mm.eg.db")
-df_anno <- as.data.frame(anno_all)
-
-# Extract IDs for peaks specifically located at Promoters
-peak_ids <- if("name" %in% colnames(df_anno)) df_anno$name else rownames(df_anno)
-promoter_ids <- peak_ids[grepl("Promoter", df_anno$annotation)]
-
-# 1. Add the missing prefix to match edgeR's naming format
-correct_promoter_ids <- paste0("H3K27ac_peak_", promoter_ids)
-
-# Quick safety check print
-cat("Sample of corrected IDs:", head(correct_promoter_ids), "\n")
-
-# 2. Subset your tests using the corrected names
-library(limma)
-res_CC    <- decideTests(test2[rownames(test2) %in% correct_promoter_ids, ], p.value = 0.05, lfc = 1)
-res_Hyp   <- decideTests(test1[rownames(test1) %in% correct_promoter_ids, ], p.value = 0.05, lfc = 1)
-res_CCHyp <- decideTests(test3[rownames(test3) %in% correct_promoter_ids, ], p.value = 0.05, lfc = 1)
-
-# 3. Combine into the final 3-way matrix
-results_3way <- cbind(
-  CC     = res_CC,
-  Hyp    = res_Hyp,
-  CC_Hyp = res_CCHyp
+profile_df <- rbind(
+  get_profile(avg_mats_SPI1$CC_H, "SPI1_CC_H"),
+  get_profile(avg_mats_IRF8$CC_H, "IRF8_CC_H"),
+  get_profile(avg_mats_NFKB$CC_H, "NFKB_CC_H"),
+  get_profile(avg_mats_SPI1$CC_N, "SPI1_CC_N"),
+  get_profile(avg_mats_IRF8$CC_N, "IRF8_CC_N"),
+  get_profile(avg_mats_NFKB$CC_N, "NFKB_CC_N")
 )
 
-# 4. Re-plot the Venn Diagram (The numbers should appear now)
-par(mar = c(4, 4, 8, 4), cex = 0.7)
-vennDiagram(results_3way, 
-            include = c("up", "down"), 
-            counts.col = c("blue", "red"),
-            main = "Promoter Peaks: 3-Way Interaction", 
-            cex.main = 2.0)
-```
-### Finding peaks thanks to the unique combination of CC and Hyp
-```{r}
-# 1. Isolate the exclusive peak row names using column positions (1=CC, 2=Hyp, 3=CC_Hyp)
-exc_up_idx <- which(results_3way[, 1] == 0 & 
-                    results_3way[, 2] == 0 & 
-                    results_3way[, 3] == 1)
-
-exc_down_idx <- which(results_3way[, 1] == 0 & 
-                      results_3way[, 2] == 0 & 
-                      results_3way[, 3] == -1)
-
-exc_up_peaks <- rownames(results_3way)[exc_up_idx]
-exc_down_peaks <- rownames(results_3way)[exc_down_idx]
-
-# 2. Build a matching id column in your original annotation dataframe
-df_anno$fixed_id <- paste0("H3K27ac_peak_", rownames(df_anno))
-
-# 3. Pull the exclusive gene sets
-genes_up_exclusive   <- unique(df_anno$SYMBOL[df_anno$fixed_id %in% exc_up_peaks])
-genes_down_exclusive <- unique(df_anno$SYMBOL[df_anno$fixed_id %in% exc_down_peaks])
-
-# 4. Print clean lists to your console
-cat("\n--- GENES WITH EXCLUSIVELY OPENED PROMOTERS ---\n")
-print(head(sort(genes_up_exclusive), 50))
-
-cat("\n--- GENES WITH EXCLUSIVELY CLOSED PROMOTERS ---\n")
-print(head(sort(genes_down_exclusive), 50))
+ggplot(profile_df, aes(x = position_bp, y = signal, color = motif)) +
+  geom_line(linewidth = 1) +
+  theme_minimal() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "H3K27ac signal around TF motif occurrences",
+    x = "Distance from motif center (bp)",
+    y = "Mean H3K27ac signal"
+  )
 ```
 
-Promoter peaks** (within ±2000 bp of a Transcription Start Site) and analyzed them using a **3-way Venn diagram**.
+# Enrichment analysis
 
-Instead of comparing just two groups, they looked at the intersection of three distinct operational contrasts:
+Enrichment for H3K27ac gain
 
-1. 
-**`CC`**: Co-culture effect under normoxia (`CC_N` vs `Ctrl_N`).
-
-2. 
-**`Hyp`**: Hypoxia effect in monoculture (`Ctrl_H` vs `Ctrl_N`).
-
-3. 
-**`CC+Hyp`**: Hypoxia effect during co-culture (`CC_H` vs `CC_N`).
-
----
-
-### How the Paper Calculated the Opening Peaks (Figure 5C)
-
-By mapping the 3-way intersection of opening promoter regions, they found a total of **1,680 peaks** that opened up in the hypoxic co-culture (`CC+Hyp`) condition:
-
-* 
-**1,515 peaks (The Specific Core):** These were completely unique to the `CC+Hyp` circle. They do not open when microglia are exposed to tumor cells alone under normal oxygen, nor do they open when exposed to hypoxia alone in a monoculture. They strictly require both hits simultaneously.
-
-
-* 
-**109 peaks (The Hypoxia Overlap):** These peaks opened up in `CC+Hyp` but also overlapped with the baseline hypoxia-alone (`Hyp`) circle ($83 + 26$ shared peaks in their 3-way plot).
-
-
----
-
-### How the Paper Calculated the Closing Peaks (Figure 5D)
-
-They applied the exact same 3-way partitioning to the **1,439 promoter peaks** that closed down during hypoxic co-culture:
-
-* 
-**951 peaks:** Were completely unique to the combined `CC+Hyp` circle.
-
-
-* 
-**483 peaks:** Overlapped with baseline hypoxia-alone closing events ($480 + 3$ shared peaks in their plot).
-
----
-
-### The Biological Conclusion of This Analysis
-
-This specific mathematical breakdown allowed the authors to discover a major dual mechanism in brain tumors:
-
-* 
-**Hypoxia alone is primarily a silencer:** When microglia are by themselves, low oxygen mostly acts as a genomic brake, actively closing down promoter regions.
-
-
-* 
-**The tumor subverts the architecture:** The moment you introduce glioma cells into that exact same low-oxygen space, they completely rewrite the rules. Instead of letting those switches turn off, the tumor-microglia interaction overrides the system, forcing **1,515 entirely new gene promoters** to violently open up and drive the aggressive, immunosuppressive state.
-
-
----- difference mine and paper code:
-Your code and the paper are answering **different** questions.
-
-Here is exactly why your comparison is different, why it is still useful, and the roadmap you should follow for the clearest biological picture.
-
-### The Difference in "Synergy"
-
-**Your Synergy (The "Additive" Effect):**
-Your code asks: *Which peaks are pushed by hypoxia alone, and then pushed **again** by the tumor?* * `Ctlr_H vs Ctlr_N`: Does hypoxia change this?
-
-* `CC_H vs Ctlr_H`: Does adding the tumor change it further?
-* **Why you need it:** This identifies genes that are highly sensitive to *both* distinct stressors. It finds the "double-hit" genes.
-
-**The Paper's Synergy (The "Exclusive" Effect):**
-The paper asks: *Which peaks **only** change when both hypoxia and the tumor are present at the same time?*
-
-* They compared three different states simultaneously to find peaks that were completely dormant in monoculture (even under hypoxia) but violently opened in co-culture under hypoxia.
-
----
-
-### What You Did vs. What the Paper Did
-
-| Feature | Your Analysis | The Paper's Analysis |
-| --- | --- | --- |
-| **Genomic Scope** | **Whole Genome:** Analyzed all peaks (promoters, introns, intergenic). | **Promoters Only:** Filtered strictly for peaks $\pm 2000$ bp from a TSS first. |
-| **Math Model** | **2-Way Intersection:** Compared two contrasts at a time. | **3-Way Intersection:** Compared three contrasts simultaneously. |
-| **Core Question** | Which peaks are compounded by both stressors? | Which promoters are exclusively unlocked by the dual-environment? |
-
-# Over-Representation Analysis (ORA) with clusterProfiler and enrichGO - BACKGROUND important -> all consensus peaks
 ```{r}
-library(clusterProfiler)
-library(org.Mm.eg.db)
-library(enrichplot)
-library(ggplot2)
+# H3K27ac gain in hypoxic co-culture
+acetylation_gain_CC_H_vs_CC_N <- acetylation_CC_H_vs_CC_N[acetylation_CC_H_vs_CC_N$logFC > 0.6]
 
-length(genes_up_exclusive)
-length(genes_down_exclusive)
+# running GREAT-style enrichment analysis on regions that are differentially acetylated in CC_H vs. CC_N
+# we use the mouse mm10 genome annotation to link regions to nearby genes/TSSs
+# gene_sets="GO:BP" specifies that we test enrichment for Gene Ontology Biological Process terms
+enrichment_acetylation_gain_CC_H_vs_CC_N <- great(acetylation_gain_CC_H_vs_CC_N, gene_sets="GO:BP", tss_source="mm10", background=consensus_kept, cores=2)
+enrichment_table_acetylation_gain_CC_H_vs_CC_N <- getEnrichmentTables(enrichment_acetylation_gain_CC_H_vs_CC_N)
+enrichment_table_acetylation_gain_CC_H_vs_CC_N <- enrichment_table_acetylation_gain_CC_H_vs_CC_N[order(enrichment_table_acetylation_gain_CC_H_vs_CC_N$p_adjust), ]
 
-# Annotate the ENTIRE consensus peak set to capture the full ATAC "universe"
-anno_consensus <- annotatePeak(consensus_peaks, 
-                               tssRegion = c(-2000, 2000), 
-                               TxDb = txdb, 
-                               annoDb = "org.Mm.eg.db")
-# Extract the data frame
-df_anno_consensus <- as.data.frame(anno_consensus)
-# Create your background universe (all unique gene symbols detected in the ATAC-seq experiment)
-all_atac_genes <- unique(df_anno_consensus$SYMBOL)
-all_atac_genes <- all_atac_genes[!is.na(all_atac_genes)] # Remove NAs
+head(enrichment_table_acetylation_gain_CC_H_vs_CC_N, 15)
+ggplot(head(enrichment_table_acetylation_gain_CC_H_vs_CC_N, 15), aes(fold_enrichment, reorder(description, p_adjust),
+                        size=observed_region_hits, color=-log10(p_adjust))) + geom_point() + scale_color_viridis_c()
+```
 
-# 2. Run GO Enrichment (ORA) for UP genes
-go_up <- enrichGO(
-  gene          = genes_up_exclusive,
-  universe      = all_atac_genes,      # background
-  OrgDb         = org.Mm.eg.db,
-  keyType       = "SYMBOL",  # Your vectors contain gene symbols
-  ont           = "ALL",      # "BP" = Biological Process (can also use "MF", "CC", or "ALL")
-  pAdjustMethod = "BH",      # Benjamini-Hochberg for FDR
-  pvalueCutoff  = 0.05,
-  qvalueCutoff  = 0.05,
-  readable      = TRUE
+Plotting H3K27ac signal in regions that gain H3K27ac in CC_H compared to CC_N 
+
+```{r}
+acetylation_gain_signal_CC_H_vs_CC_N <- signal2Matrix(tracks, acetylation_gain_CC_H_vs_CC_N, extend = 2000)
+
+mat_list_gain <- as.list(assay(acetylation_gain_signal_CC_H_vs_CC_N, "input"))
+
+CC_N_mat_gain <- average_matrices(
+  mat_list_gain[c("H3K27ac_CC_N_1", "H3K27ac_CC_N_2")],
+  "CC_N"
+)
+CC_H_mat_gain <- average_matrices(
+  mat_list_gain[c("H3K27ac_CC_H_1", "H3K27ac_CC_H_2")],
+  "CC_H"
 )
 
-# 4. Run the GO enrichment using this universe
-go_down <- enrichGO(
-  gene          = genes_down_exclusive,
-  universe      = all_atac_genes,      # background
-  OrgDb         = org.Mm.eg.db,
-  keyType       = "SYMBOL",
-  ont           = "ALL",               # Checks BP, MF, and CC or ALL
-  pAdjustMethod = "BH",
-  pvalueCutoff  = 0.05,
-  qvalueCutoff  = 0.05,
-  readable      = TRUE
+avg_mats_gain <- list(CC_H = CC_H_mat_gain, CC_N = CC_N_mat_gain)
+
+plotEnrichedHeatmaps(avg_mats_gain, trim = 0.95, multiScale = FALSE, axis_name = "0")
+```
+
+The increase in H3K27ac signal, if present, is marginal. Therefore, it is not necessarily visible in averaged H3K27ac signal plots. The heatmaps may be dominated by the larger number or stronger signal change of regions that lose H3K27ac, causing the overall visual pattern to show reduced acetylation in CC_H compared with CC_N, even though a subset of regions shows coordinated gains in H3K27ac.
+
+Enrichment for H3K27ac loss
+
+```{r}
+# H3K27ac loss in hypoxic co-culture
+acetylation_loss_CC_H_vs_CC_N <- acetylation_CC_H_vs_CC_N[acetylation_CC_H_vs_CC_N$logFC < -0.6]
+
+# running GREAT-style enrichment analysis on regions that are differentially acetylated in CC_H vs. CC_N
+# we use the mouse mm10 genome annotation to link regions to nearby genes/TSSs
+# gene_sets="GO:BP" specifies that we test enrichment for Gene Ontology Biological Process terms
+enrichment_acetylation_loss_CC_H_vs_CC_N <- great(acetylation_loss_CC_H_vs_CC_N, gene_sets="GO:BP", tss_source="mm10", background=consensus_kept, cores=2)
+enrichment_table_acetylation_loss_CC_H_vs_CC_N <- getEnrichmentTables(enrichment_acetylation_loss_CC_H_vs_CC_N)
+enrichment_table_acetylation_loss_CC_H_vs_CC_N <- enrichment_table_acetylation_loss_CC_H_vs_CC_N[order(enrichment_table_acetylation_loss_CC_H_vs_CC_N$p_adjust), ]
+
+head(enrichment_table_acetylation_loss_CC_H_vs_CC_N, 15)
+ggplot(head(enrichment_table_acetylation_loss_CC_H_vs_CC_N, 15), aes(fold_enrichment, reorder(description, p_adjust),
+                        size=observed_region_hits, color=-log10(p_adjust))) + geom_point() + scale_color_viridis_c()
+```
+
+Plotting H3K27ac signal in regions that lose H3K27ac in CC_H compared to CC_N 
+
+```{r}
+acetylation_loss_signal_CC_H_vs_CC_N <- signal2Matrix(tracks, acetylation_loss_CC_H_vs_CC_N, extend = 2000)
+
+mat_list_loss <- as.list(assay(acetylation_loss_signal_CC_H_vs_CC_N, "input"))
+
+CC_N_mat_loss <- average_matrices(
+  mat_list_loss[c("H3K27ac_CC_N_1", "H3K27ac_CC_N_2")],
+  "CC_N"
+)
+CC_H_mat_loss <- average_matrices(
+  mat_list_loss[c("H3K27ac_CC_H_1", "H3K27ac_CC_H_2")],
+  "CC_H"
 )
 
-# Plot the results
-dotplot(go_up, showCategory = 15, font.size = 9) + 
-  ggtitle("GO terms: Exclusively Opened Promoters (UP)") +
-  theme(plot.title = element_text(size = 11, face = "bold"))
+avg_mats_loss <- list(CC_H = CC_H_mat_loss, CC_N = CC_N_mat_loss)
 
-dotplot(go_down, showCategory = 15, font.size = 9) + 
-  ggplot2::ggtitle("GO terms: Exclusively Closed Promoters (DOWN)") +
-  ggplot2::theme(plot.title = ggplot2::element_text(size = 11, face = "bold"))
+plotEnrichedHeatmaps(avg_mats_loss, trim = 0.95, multiScale = FALSE, axis_name = "0")
+```
+
+```{r}
+print(paste0("Mean log2FC among significant differentially acetylated regions: ", mean(acetylation_CC_H_vs_CC_N$logFC)))
+print(paste0("Mean log2FC among H3K27ac-gain regions: ", mean(acetylation_gain_CC_H_vs_CC_N$logFC)))
+print(paste0("Mean log2FC among H3K27ac-loss regions: ", mean(acetylation_loss_CC_H_vs_CC_N$logFC)))
+```
+
+H3K27ac-loss regions are stronger acetylation regions overall, so when they lose signal, the absolute visual decrease is large. H3K27ac-gain regions are lower-signal regions overall, so even if their relative logFC is positive, the absolute increase is visually modest.
+
+# H3K27ac signal around genic regions
+
+```{r}
+# # importing enh_up and enh_down from part2
+# enh_down <- readRDS("enh_down.rds")
+# enh_up   <- readRDS("enh_up.rds")
 ```
 
 
-## Average .bw files for IGV visualization (for the image I uploaded)
-```{r, eval=FALSE}
-library(rtracklayer)
-library(GenomicRanges)
 
-# Set your directory
-setwd("~/Desktop/epigenHypoxia/filtered_bams")
 
-average_bigwigs <- function(file1, file2, output_file) {
-  if (!file.exists(file1)) stop(paste("Missing file:", file1))
-  if (!file.exists(file2)) stop(paste("Missing file:", file2))
-  
-  message("Averaging: ", file1, " and ", file2)
-  
-  # 1. Import bigWig files as genomic ranges
-  bw1 <- import(file1)
-  bw2 <- import(file2)
-  
-  # 2. Convert to base-by-base tracks using the 'score' column
-  cov1 <- coverage(bw1, weight="score")
-  cov2 <- coverage(bw2, weight="score")
-  
-  # 3. Ensure both tracks share the exact same chromosomes
-  common_chroms <- intersect(names(cov1), names(cov2))
-  cov1 <- cov1[common_chroms]
-  cov2 <- cov2[common_chroms]
-  
-  # 4. Calculate the mathematical mean across the genome
-  avg_cov <- (cov1 + cov2) / 2
-  
-  # 5. Export back to a clean bigWig file
-  export.bw(avg_cov, output_file)
-  message("Saved: ", output_file, "\n")
-}
-
-# Run the averaging operations
-# ATAC-seq Controls
-average_bigwigs("H3K27ac_Ctlr_N_1.bw", "H3K27ac_Ctlr_N_2.bw", "H3K27ac_Ctlr_N_averaged.bw")
-average_bigwigs("H3K27ac_Ctlr_H_1.bw", "H3K27ac_Ctlr_H_2.bw", "H3K27ac_Ctlr_H_averaged.bw")
-
-# ATAC-seq Co-Cultures
-average_bigwigs("H3K27ac_CC_N_1.bw", "H3K27ac_CC_N_2.bw", "H3K27ac_CC_N_averaged.bw")
-average_bigwigs("H3K27ac_CC_H_1.bw", "H3K27ac_CC_H_2.bw", "H3K27ac_CC_H_averaged.bw")
-
+```{r}
+# # plot the signals:
+# plotEnrichedHeatmaps(avg_mats_enh_up, trim=0.95, multiScale = FALSE, axis_name = "0")
 ```
 
+```{r}
+# # plot the signals:
+# plotEnrichedHeatmaps(avg_mats_enh_down, trim=0.95, multiScale = FALSE, axis_name = "0")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+git
+upset plots, overlaps acetylation between conditions to see if there are dynamic changes, acetylation with accessibility
+genic regions acetylation
+connect all three parts, coherent story
+deassuggestions
+!!!!
