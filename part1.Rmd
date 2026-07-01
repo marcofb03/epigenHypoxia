@@ -29,7 +29,7 @@ suppressPackageStartupMessages({
 #### Glioblastoma is notorious for its highly hypoxic core, an oxygen-deprived region that actively recruits brain-resident microglia and peripheral macrophages. Instead of fighting the tumor, these glioma-associated myeloid cells (GAMs) are functionally hijacked by the microenvironment. They rapidly abandon their homeostatic, neuroprotective roles to support tumor progression, shield cancer cells from the immune system, and accumulate lipid droplets. While these drastic changes are visible in the cell's transcriptome, analyzing RNA alone does not explain all the underlying structural switches that lock these myeloid cells into such persistent, malicious states. To uncover these hidden regulatory mechanisms, the authors focused on the chromatin landscape. By using ATAC-seq to map global shifts in chromatin accessibility and H3K27ac CUT&RUN to track active promoters, the study explores the precise epigenetic foundation of myeloid cell plasticity. It shows that while hypoxia alone tends to restrict promoter openness, the direct synergy of physical glioma cell contact combined with severe oxygen deprivation forcefully remodels chromatin, effectively closing down core microglial identity genes (like P2ry12 and Tmem119) and opening up pathways that fuel tumor aggressiveness.
 #### Our re-analysis focuses specifically on this epigenetic dataset (GEO: GSE300330) to validate how hypoxic stress and tumor cell contact cooperatively alter chromatin landscapes, locking microglia into a pro-tumorigenic phenotype.
 
-![Figure 2A from the paper: Schematic of co-culture (CC) experiment.](Fig2A.png)
+![Figure 2A from the paper: Schematic of co-culture (CC) experiment.](https://raw.githubusercontent.com/marcofb03/epigenHypoxia/main/images/Fig2A.png)
 
 ### Experimental Conditions Analyzed
 #### The epigenetic profiles were generated from BV2 microglial cells across four distinct experimental groups:
@@ -232,7 +232,7 @@ ggplot(df_cnr, aes(x = Run, y = Peak_Counts, color = Group)) +
 ## Consensus peaks
 #### To generate high-confidence consensus regions, we applied distinct statistical approaches tailored to the structural nature of each epigenetic mark. For the sharp, highly localized open-chromatin peaks of ATAC-seq, we utilized the Irreproducible Discovery Rate (IDR) framework, in accordance with the best-practice guidelines established by the ENCODE consortium. Unlike arbitrary p-value intersections—which often discard true biological signals due to marginal threshold failures in a single replicate, IDR evaluates the rank-order consistency of peak significance across samples, dynamically defining a robust signal-to-noise threshold that maximizes sensitivity while strictly controlling false positives. Conversely, the broad, diffuse domains characteristic of H3K27ac exhibit high summit variation, rendering the rank-order mathematics of IDR unsuitable. Therefore, we employed a strict biological overlap strategy for CUT&RUN data, retaining only regions identified in at least two replicates. Finally, to construct a unified, non-redundant consensus atlas for downstream quantification, valid regions were merged using a 1bp minimum overlap rather than a rigid, predefined window (e.g., 200bp).
 
-![Example of the output plot from the IDR filtering on the monocolture_hypoxia replicates](peaks/idr/cond_Ctlr_H_idr.txt.png)
+![Example of the output plot from the IDR filtering on the monocolture_hypoxia replicates](https://raw.githack.com/marcofb03/epigenHypoxia/main/images/cond_Ctlr_H_idr.txt.png)
 
 
 ### IDR (Irreproducible Discovery Rate) per condition for ATACseq
@@ -413,84 +413,5 @@ colnames(h3k27ac_count_matrix) <- c(
 saveRDS(h3k27ac_count_matrix, "peaks/H3K27ac_count_matrix.rds")
 ```
 
-
-
-# FINISH
-# PCA I WOULD REMOVE THE TWO CHUNKS OF PCA completely
-
-### PCA on ATACseq (from Peak Calling)
-```{r, eval=FALSE}
-peak_matrix <- sapply(atac_peaks_list, function(x) {
-  as.integer(overlapsAny(atac_consensus, x))
-})
-colnames(peak_matrix) <- gsub("_ATAC.*", "", basename(atac_peak_files))
-
-pca_res <- prcomp(t(peak_matrix))
-var_pct <- round(100 * (pca_res$sdev^2 / sum(pca_res$sdev^2)), 1)
-
-pca_df <- data.frame(
-  Run = colnames(peak_matrix),
-  PC1 = pca_res$x[, 1],
-  PC2 = pca_res$x[, 2]
-)
-pca_df <- merge(pca_df, df_atac, by = "Run")
-
-stopifnot(!any(is.na(pca_df$Group)))
-
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
-  geom_point(size = 6) +
-  scale_color_manual(values = c(
-    "Ctrl_N" = "purple",
-    "CC_N"   = "darkgreen",
-    "Ctrl_H" = "lightblue",
-    "CC_H"   = "red" )) + 
-  labs(title = "PCA ATACseq",
-    x = paste0("PC1: ", var_pct[1], "%"),
-    y = paste0("PC2: ", var_pct[2], "%"),
-    color = "Group") +
-  theme_bw() +
-  theme( panel.grid = element_blank(),
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    legend.position = "right")
-```
-
-### PCA on H3K27ac (from Peak Calling) 
-```{r, eval=FALSE}
-H3K27ac_peak_files <- list.files("peaks/cutnrun", pattern = "broadPeak$", full.names = TRUE)
-H3K27ac_peaks_list <- lapply(H3K27ac_peak_files, rtracklayer::import)
-
-peak_matrix <- sapply(cnr_peaks_list, function(x) {
-  as.integer(overlapsAny(H3K27ac_consensus, x))
-})
-colnames(peak_matrix) <- gsub("_H3K27ac.*", "", basename(H3K27ac_peak_files))
-
-pca_res <- prcomp(t(peak_matrix))
-var_pct <- round(100 * (pca_res$sdev^2 / sum(pca_res$sdev^2)), 1)
-
-pca_df <- data.frame(
-  Run = colnames(peak_matrix),
-  PC1 = pca_res$x[, 1],
-  PC2 = pca_res$x[, 2]
-)
-pca_df <- merge(pca_df, df_cnr, by = "Run")
-
-stopifnot(!any(is.na(pca_df$Group)))
-
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
-  geom_point(size = 6) +
-  scale_color_manual(values = c(
-    "Ctrl_N" = "purple",
-    "CC_N"   = "darkgreen",
-    "Ctrl_H" = "lightblue",
-    "CC_H"   = "red" )) +
-  labs( title = "PCA H3K27ac",
-    x = paste0("PC1: ", var_pct[1], "%"),
-    y = paste0("PC2: ", var_pct[2], "%"),
-    color = "Group") +
-  theme_bw() +
-  theme( panel.grid = element_blank(),
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    legend.position = "right")
-```
 
 
