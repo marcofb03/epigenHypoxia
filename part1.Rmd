@@ -1,8 +1,8 @@
 ---
 title: "part1"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
   word_document: default
 date: "2026-06-15"
 ---
@@ -21,8 +21,30 @@ suppressPackageStartupMessages({
   library(epiwraps)
 })
 ```
+# Re-analysis of "Hypoxic stress dysregulates functions of glioma- associated myeloid cells through epigenomic and transcriptional programs" ([View article](https://www.cell.com/cell-reports/fulltext/S2211-1247(25)00993-3))
 
-## Pre-processing
+### Introduction to the paper methods and the data analyzed
+#### This paper investigates the transcriptomic (with RNAseq) and epigenetics (with ATACseq, H3K27ac CUT&RUN) changes in microglia and macrophages when associated with glioma cancer cells in hypoxia. We will analize their same epigenetics data, where they used BV2, an immortalized mouse microglial cell line, with GL261, a mouse glioma cell line. 
+#### The paper aims to address a critical question: **how do hypoxia and tumor microenvironment cues mechanically rewrite myeloid cell identity?**
+#### Glioblastoma is notorious for its highly hypoxic core, an oxygen-deprived region that actively recruits brain-resident microglia and peripheral macrophages. Instead of fighting the tumor, these glioma-associated myeloid cells (GAMs) are functionally hijacked by the microenvironment. They rapidly abandon their homeostatic, neuroprotective roles to support tumor progression, shield cancer cells from the immune system, and accumulate lipid droplets. While these drastic changes are visible in the cell's transcriptome, analyzing RNA alone does not explain all the underlying structural switches that lock these myeloid cells into such persistent, malicious states. To uncover these hidden regulatory mechanisms, the authors focused on the chromatin landscape. By using ATAC-seq to map global shifts in chromatin accessibility and H3K27ac CUT&RUN to track active promoters, the study explores the precise epigenetic foundation of myeloid cell plasticity. It shows that while hypoxia alone tends to restrict promoter openness, the direct synergy of physical glioma cell contact combined with severe oxygen deprivation forcefully remodels chromatin, effectively closing down core microglial identity genes (like P2ry12 and Tmem119) and opening up pathways that fuel tumor aggressiveness.
+#### Our re-analysis focuses specifically on this epigenetic dataset (GEO: GSE300330) to validate how hypoxic stress and tumor cell contact cooperatively alter chromatin landscapes, locking microglia into a pro-tumorigenic phenotype.
+
+![Figure 2A from the paper: Schematic of co-culture (CC) experiment.](Fig2A.png)
+
+### Experimental Conditions Analyzed
+#### The epigenetic profiles were generated from BV2 microglial cells across four distinct experimental groups:
+
+* #### **Control Normoxia (Ctrl_N):** BV2 microglia baseline monoculture under normal oxygen levels (21% O2). This serves as the homeostatic control group.
+* #### **Control Hypoxia (Ctrl_H):** BV2 monoculture exposed to severe oxygen deprivation (<0.1% O2) for 16 hours. This isolates the independent impact of low oxygen on the epigenome.
+* #### **Co-culture Normoxia (CC_N):** BV2 microglia co-cultured directly with GL261 glioma cells under normal oxygen. This captures the structural changes driven solely by physical tumor contact and signaling.
+* #### **Co-culture Hypoxia (CC_H):** BV2 microglia co-cultured with glioma cells under severe low oxygen. This replicates the actual glioblastoma core environment to reveal the synergy of both stressors.
+
+#### This precise setup allows our re-analysis to dissect exactly which chromatin regions are altered by oxygen stress alone, which respond purely to tumor presence, and which specific loci require both inputs to lock microglia into a pro-tumorigenic state.
+
+# Pre-processing: from .bam files to consensus peaks
+
+#### We started with the .bam files of ATACseq data and CUT&RUN data of H3K27ac histone mark. 
+#### To evaluate the quality of the ATAC-seq and CUT&RUN alignment data, *samtools flagstat* computes overall mapping percentages and *samtools idxstats* determines read counts per individual chromosome, allowing *multiqc* to aggregate all of these metrics into a single, comprehensive visual report. [View Initial MultiQC Report](https://raw.githack.com/marcofb03/epigenHypoxia/main/qc_final_report/multiqc_report.html)
 
 ### Load aligned .bam files of ATACseq and H3K27ac CUT&RUN
 ```{bash engine.opts='-l', eval=FALSE}
@@ -42,8 +64,12 @@ done
 multiqc qc_reports/ -o qc_final_report/
 ```
 
+#### The multiQC report highlighted two .bam files with  under the threshold of 70%, so we decided to discard them  to not compromise the analysis with the other higher quality replicates for the same conditions. 
+#### Low-quality replicates were discarded due to a *% Read Mapped* below 70% (SRR34076323: 63.5% and SRR34076325: 37.5%). For the remaining samples, alignments were filtered using samtools to retain high-quality nuclear reads (Mapping Quality > 30) while removing mitochondrial DNA (chrM). PCR duplicates, which reached 80% in certain samples, were systematically removed to eliminate severe amplification bias and ensure optimal peak-calling accuracy.
+
 ### Filtering low quality .bam reads
 ```{bash engine.opts='-l', eval= FALSE}
+rm -fr CnR/SRR34076323 CnR/SRR34076325
 mkdir -p filtered_bams qc_reports/dup_metrics
 
 for bam in ATAC/*.bam CnR/*.bam; do
@@ -66,6 +92,10 @@ done
 
 multiqc qc_reports_filt/ -o qc_final_report_filt/
 ```
+
+#### A post-filtering MultiQC report was generated to verify the success of the preprocessing pipeline, confirming the complete removal of PCR duplicates, mitochondrial contamination, and low-quality reads (MAPQ > 30) across all remaining samples, resulting in a clean dataset optimized for downstream peak calling. All replicates after filtering remained with more than 10M of mapped reads (except one with 9.4M). [View Filtered MultiQC Report](https://raw.githack.com/marcofb03/epigenHypoxia/main/qc_final_report_filt/multiqc_report_filt.html)
+
+#### We performed peak calling using *macs3*, specifying the *-f BAMPE* parameter to leverage paired-end sequencing data. While this paired-end mode natively captures true physical fragment sizes, the parameters *--nomodel* and *--shift 0* were explicitly retained as a configuration safeguard to strictly guarantee that no automated fragment-size estimation or empirical shifting could alter the exact insert coordinates. We set the effective genome for mouse *-g mm* and applied tailored False Discovery Rate thresholds: a strict q<0.01 for sharp ATAC-seq open-chromatin peaks, and a standard q<0.05 paired with the *--broad* flag to accurately merge diffuse H3K27ac histone modification domains. Finally, we used *bamCoverage* to generate bigWig tracks normalized via *--normalizeUsing RPKM* to standardize read depth across all samples.
 
 ### Peak calling and bamCoverage
 ```{bash engine.opts='-l', eval=FALSE}
@@ -120,6 +150,8 @@ for sample in "${cnr_samples[@]}"; do
 done
 echo "Peak calling and bigWig conversion complete"
 ```
+
+#### Following peak calling, a technical quality control check on peak abundance revealed excellent technical reproducibility across all ATAC-seq samples, with every replicate consistently yielding over 20,000 high-confidence open-chromatin peaks. Conversely, two H3K27ac CUT&RUN replicates were excluded from downstream analysis due to an extremely low peak yield (SRR34076315 with X and SRR34076320 with **X** peaks), signaling an isolated technical failure that would otherwise severely compromise statistical power and introduce false negatives during further analysis.
 
 ## Technical Quality Control
 ### Quality Control on peak counts of ATACseq (from Peak Calling)
@@ -197,9 +229,29 @@ ggplot(df_cnr, aes(x = Run, y = Peak_Counts, color = Group)) +
     
 ```
 
-## IDR (Irreproducible Discovery Rate) per condition
+## Consensus peaks
+#### To generate high-confidence consensus regions, we applied distinct statistical approaches tailored to the structural nature of each epigenetic mark. For the sharp, highly localized open-chromatin peaks of ATAC-seq, we utilized the Irreproducible Discovery Rate (IDR) framework, in accordance with the best-practice guidelines established by the ENCODE consortium. Unlike arbitrary p-value intersections—which often discard true biological signals due to marginal threshold failures in a single replicate, IDR evaluates the rank-order consistency of peak significance across samples, dynamically defining a robust signal-to-noise threshold that maximizes sensitivity while strictly controlling false positives. Conversely, the broad, diffuse domains characteristic of H3K27ac exhibit high summit variation, rendering the rank-order mathematics of IDR unsuitable. Therefore, we employed a strict biological overlap strategy for CUT&RUN data, retaining only regions identified in at least two replicates. Finally, to construct a unified, non-redundant consensus atlas for downstream quantification, valid regions were merged using a 1bp minimum overlap rather than a rigid, predefined window (e.g., 200bp).
+
+![Example of the output plot from the IDR filtering on the monocolture_hypoxia replicates](peaks/idr/cond_Ctlr_H_idr.txt.png)
+
+
+### IDR (Irreproducible Discovery Rate) per condition for ATACseq
 ```{bash engine.opts='-l', eval= FALSE}
+'''
+On MacOS
+I ve creaed a dedicated Intel-emulated environment and installed IDR (in chip M1 Apple didnt work)
+> CONDA_SUBDIR=osx-64 conda create -n idr_env python=3.9 idr -c bioconda -c conda-forge -y
+> conda activate idr_env
+> conda config --env --set subdir osx-64 #(lock the architecture: prevents Conda from accidentally trying to install M-chip packages)
+-> then I ran this command below on a .sh file
+'''
 mkdir -p peaks/idr 
+
+# Create pooled files on ATAC
+cat peaks/atac/SRR31003498_ATAC_peaks.narrowPeak peaks/atac/SRR31003499_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_Ctlr_N_pooled_peaks.narrowPeak
+cat peaks/atac/SRR31003496_ATAC_peaks.narrowPeak peaks/atac/SRR31003497_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_Ctlr_H_pooled_peaks.narrowPeak
+cat peaks/atac/SRR31003494_ATAC_peaks.narrowPeak peaks/atac/SRR31003495_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_CC_N_pooled_peaks.narrowPeak
+cat peaks/atac/SRR31003492_ATAC_peaks.narrowPeak peaks/atac/SRR31003493_ATAC_peaks.narrowPeak | sort -k8,8nr > peaks/atac/cond_CC_H_pooled_peaks.narrowPeak
 
 idr --samples SRR31003498_ATAC_peaks.narrowPeak SRR31003499_ATAC_peaks.narrowPeak \
     --peak-list cond_Ctlr_N_pooled_peaks.narrowPeak \
@@ -234,8 +286,8 @@ idr --samples SRR31003492_ATAC_peaks.narrowPeak SRR31003493_ATAC_peaks.narrowPea
     --plot
 ```
 
-## Filter and Union by IDR to get consensus
-```{r}
+### Filter and Union by IDR to get consensus
+```{r, eval=FALSE}
 load_idr_peaks <- function(idr_file_path) {
 
   idr_data <- read.table(idr_file_path, sep="\t", header=FALSE, stringsAsFactors=FALSE)
@@ -258,8 +310,116 @@ names(atac_consensus) <- paste0("ATAC_IDR_peak_", seq_along(atac_consensus))
 saveRDS(atac_consensus, "peaks/atac_consensus.rds")
 ```
 
+### Consensus H3K27ac by Intersection
+```{r, eval=FALSE}
+library(GenomeInfoDb)
+
+get_replicated_per_cond <- function(file_paths, min_reps = 2) {
+  
+  peaks <- lapply(file_paths, rtracklayer::import)
+  peaks <- lapply(peaks, function(p) keepStandardChromosomes(p, pruning.mode="coarse"))  
+  unioned <- GenomicRanges::reduce(do.call(c, peaks))
+  
+  overlap_counts <- rowSums(sapply(peaks, function(p) {
+    GenomicRanges::countOverlaps(unioned, p) > 0
+  }))
+  
+  return(unioned[overlap_counts >= min_reps])
+}
+cnr_Ctlr_N <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076321_H3K27ac_peaks.broadPeak", 
+                                        "peaks/cutnrun/SRR34076324_H3K27ac_peaks.broadPeak"))
+cnr_Ctlr_H <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076319_H3K27ac_peaks.broadPeak", 
+                                        "peaks/cutnrun/SRR34076322_H3K27ac_peaks.broadPeak"))
+cnr_CC_N <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076317_H3K27ac_peaks.broadPeak", 
+                                      "peaks/cutnrun/SRR34076318_H3K27ac_peaks.broadPeak"))
+cnr_CC_H <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076314_H3K27ac_peaks.broadPeak", 
+                                      "peaks/cutnrun/SRR34076316_H3K27ac_peaks.broadPeak"))
+
+H3K27ac_consensus <- GenomicRanges::reduce(c(cnr_Ctlr_N, cnr_Ctlr_H, cnr_CC_N, cnr_CC_H))
+names(H3K27ac_consensus) <- paste0("H3K27ac_peak_", seq_along(H3K27ac_consensus))
+saveRDS(H3K27ac_consensus, "peaks/H3K27ac_consensus.rds")
+```
+
+## Count matrix quantification
+#### Following the establishment of the unified consensus peak atlases, we quantified the chromatin accessibility and histone modification signals across all samples using the *Rsubread* package. The previously generated consensus intervals were formatted into a Simplified Annotation Format (SAF) to serve as a custom reference genome. We then utilized *featureCounts* to map the filtered, paired-end .bam alignments back to these defined regions, strictly requiring that both ends of a fragment map successfully to prevent the inclusion of anomalous reads. This process generated robust, dimensionally matched raw count matrices for both the ATAC-seq and H3K27ac CUT&RUN datasets.
+
+### Creating atac_count_matrix
+```{r, results = 'hide', eval=FALSE}
+library(Rsubread)
+
+saf <- data.frame(
+  GeneID = names(atac_consensus),
+  Chr    = as.character(seqnames(atac_consensus)),
+  Start  = start(atac_consensus),
+  End    = end(atac_consensus),
+  Strand = "*"
+)
+
+bam_files <- c(
+  "filtered_bams/SRR31003498_final.bam", "filtered_bams/SRR31003499_final.bam", # Ctlr_N
+  "filtered_bams/SRR31003496_final.bam", "filtered_bams/SRR31003497_final.bam", # Ctlr_H
+  "filtered_bams/SRR31003494_final.bam", "filtered_bams/SRR31003495_final.bam", # CC_N
+  "filtered_bams/SRR31003492_final.bam", "filtered_bams/SRR31003493_final.bam"  # CC_H
+)
+counts <- Rsubread::featureCounts(
+  files = bam_files,
+  annot.ext = saf,
+  isPairedEnd = TRUE, 
+  requireBothEndsMapped = TRUE,
+  nthreads = 4
+)
+count_matrix <- counts$counts
+
+colnames(count_matrix) <- c(
+  "Ctlr_N_1", "Ctlr_N_2",
+  "Ctlr_H_1",  "Ctlr_H_2",
+  "CC_N_1", "CC_N_2",
+  "CC_H_1",  "CC_H_2"
+)
+saveRDS(count_matrix, "peaks/atac_count_matrix.rds")
+```
+
+### Creating H3K27ac_count_matrix
+```{r, results = 'hide', eval=FALSE}
+saf_cnr <- data.frame(
+  GeneID = names(H3K27ac_consensus),
+  Chr    = as.character(seqnames(H3K27ac_consensus)),
+  Start  = start(H3K27ac_consensus),
+  End    = end(H3K27ac_consensus),
+  Strand = "*"
+)
+h3k27ac_bam_files <- c(
+  "filtered_bams/SRR34076321_final.bam", "filtered_bams/SRR34076324_final.bam", # Ctlr_N
+  "filtered_bams/SRR34076319_final.bam", "filtered_bams/SRR34076322_final.bam", # Ctlr_H
+  "filtered_bams/SRR34076317_final.bam", "filtered_bams/SRR34076318_final.bam", # CC_N
+  "filtered_bams/SRR34076314_final.bam", "filtered_bams/SRR34076316_final.bam"  # CC_H
+)
+h3k27ac_counts <- Rsubread::featureCounts(
+  files = h3k27ac_bam_files,
+  annot.ext = saf_cnr,
+  isPairedEnd = TRUE, 
+  requireBothEndsMapped = TRUE,
+  nthreads = 4
+)
+h3k27ac_count_matrix <- h3k27ac_counts$counts
+
+colnames(h3k27ac_count_matrix) <- c(
+  "Ctlr_N_1", "Ctlr_N_2",
+  "Ctlr_H_1", "Ctlr_H_2",
+  "CC_N_1",   "CC_N_2",
+  "CC_H_1",   "CC_H_2"
+)
+
+saveRDS(h3k27ac_count_matrix, "peaks/H3K27ac_count_matrix.rds")
+```
+
+
+
+# FINISH
+# PCA I WOULD REMOVE THE TWO CHUNKS OF PCA completely
+
 ### PCA on ATACseq (from Peak Calling)
-```{r}
+```{r, eval=FALSE}
 peak_matrix <- sapply(atac_peaks_list, function(x) {
   as.integer(overlapsAny(atac_consensus, x))
 })
@@ -292,36 +452,6 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
   theme( panel.grid = element_blank(),
     plot.title = element_text(face = "bold", hjust = 0.5),
     legend.position = "right")
-```
-
-### Consensus H3K27ac by Intersection
-```{r}
-library(GenomeInfoDb)
-
-get_replicated_per_cond <- function(file_paths, min_reps = 2) {
-  
-  peaks <- lapply(file_paths, rtracklayer::import)
-  peaks <- lapply(peaks, function(p) keepStandardChromosomes(p, pruning.mode="coarse"))  
-  unioned <- GenomicRanges::reduce(do.call(c, peaks))
-  
-  overlap_counts <- rowSums(sapply(peaks, function(p) {
-    GenomicRanges::countOverlaps(unioned, p) > 0
-  }))
-  
-  return(unioned[overlap_counts >= min_reps])
-}
-cnr_Ctlr_N <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076321_H3K27ac_peaks.broadPeak", 
-                                        "peaks/cutnrun/SRR34076324_H3K27ac_peaks.broadPeak"))
-cnr_Ctlr_H <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076319_H3K27ac_peaks.broadPeak", 
-                                        "peaks/cutnrun/SRR34076322_H3K27ac_peaks.broadPeak"))
-cnr_CC_N <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076317_H3K27ac_peaks.broadPeak", 
-                                      "peaks/cutnrun/SRR34076318_H3K27ac_peaks.broadPeak"))
-cnr_CC_H <- get_replicated_per_cond(c("peaks/cutnrun/SRR34076314_H3K27ac_peaks.broadPeak", 
-                                      "peaks/cutnrun/SRR34076316_H3K27ac_peaks.broadPeak"))
-
-H3K27ac_consensus <- GenomicRanges::reduce(c(cnr_Ctlr_N, cnr_Ctlr_H, cnr_CC_N, cnr_CC_H))
-names(H3K27ac_consensus) <- paste0("H3K27ac_peak_", seq_along(H3K27ac_consensus))
-saveRDS(H3K27ac_consensus, "peaks/H3K27ac_consensus.rds")
 ```
 
 ### PCA on H3K27ac (from Peak Calling) 
@@ -362,76 +492,5 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
     plot.title = element_text(face = "bold", hjust = 0.5),
     legend.position = "right")
 ```
-
-## Creating atac_count_matrix
-```{r, results = 'hide'}
-library(Rsubread)
-
-saf <- data.frame(
-  GeneID = names(atac_consensus),
-  Chr    = as.character(seqnames(atac_consensus)),
-  Start  = start(atac_consensus),
-  End    = end(atac_consensus),
-  Strand = "*"
-)
-
-bam_files <- c(
-  "filtered_bams/SRR31003498_final.bam", "filtered_bams/SRR31003499_final.bam", # Ctlr_N
-  "filtered_bams/SRR31003496_final.bam", "filtered_bams/SRR31003497_final.bam", # Ctlr_H
-  "filtered_bams/SRR31003494_final.bam", "filtered_bams/SRR31003495_final.bam", # CC_N
-  "filtered_bams/SRR31003492_final.bam", "filtered_bams/SRR31003493_final.bam"  # CC_H
-)
-counts <- Rsubread::featureCounts(
-  files = bam_files,
-  annot.ext = saf,
-  isPairedEnd = TRUE, 
-  requireBothEndsMapped = TRUE,
-  nthreads = 4
-)
-count_matrix <- counts$counts
-
-colnames(count_matrix) <- c(
-  "Ctlr_N_1", "Ctlr_N_2",
-  "Ctlr_H_1",  "Ctlr_H_2",
-  "CC_N_1", "CC_N_2",
-  "CC_H_1",  "CC_H_2"
-)
-saveRDS(count_matrix, "peaks/atac_count_matrix.rds")
-```
-
-## Creating H3K27ac_count_matrix
-```{r, results = 'hide'}
-saf_cnr <- data.frame(
-  GeneID = names(H3K27ac_consensus),
-  Chr    = as.character(seqnames(H3K27ac_consensus)),
-  Start  = start(H3K27ac_consensus),
-  End    = end(H3K27ac_consensus),
-  Strand = "*"
-)
-h3k27ac_bam_files <- c(
-  "filtered_bams/SRR34076321_final.bam", "filtered_bams/SRR34076324_final.bam", # Ctlr_N
-  "filtered_bams/SRR34076319_final.bam", "filtered_bams/SRR34076322_final.bam", # Ctlr_H
-  "filtered_bams/SRR34076317_final.bam", "filtered_bams/SRR34076318_final.bam", # CC_N
-  "filtered_bams/SRR34076314_final.bam", "filtered_bams/SRR34076316_final.bam"  # CC_H
-)
-h3k27ac_counts <- Rsubread::featureCounts(
-  files = h3k27ac_bam_files,
-  annot.ext = saf_cnr,
-  isPairedEnd = TRUE, 
-  requireBothEndsMapped = TRUE,
-  nthreads = 4
-)
-h3k27ac_count_matrix <- h3k27ac_counts$counts
-
-colnames(h3k27ac_count_matrix) <- c(
-  "Ctlr_N_1", "Ctlr_N_2",
-  "Ctlr_H_1", "Ctlr_H_2",
-  "CC_N_1",   "CC_N_2",
-  "CC_H_1",   "CC_H_2"
-)
-
-saveRDS(h3k27ac_count_matrix, "peaks/h3k27ac_count_matrix.rds")
-```
-
 
 
