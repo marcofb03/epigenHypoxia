@@ -1,0 +1,691 @@
+---
+title: "part2"
+output: html_document
+date: "2026-06-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/deaka/Downloads/project_1")
+```
+
+After cleaning up our data, the next step is to analyze it. We start by loading the R packages needed for the downstream analysis, spanning differential accessibility testing, peak annotation, functional enrichment, and motif enrichment.
+
+```{r, warning=FALSE}
+suppressPackageStartupMessages({
+
+  library(GenomicRanges)
+
+  # Differential analysis
+  
+  library(edgeR)
+  library(limma)
+
+  # Annotation databases (mm10)
+  library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(org.Mm.eg.db)
+
+  # Peak annotation
+  library(ChIPseeker)
+
+  # Functional enrichment (GO / GREAT-style)
+  library(clusterProfiler)
+  library(enrichplot)
+
+  # Motif analysis
+  library(motifmatchr)
+  library(MotifDb)
+  library(universalmotif)
+  library(TFBSTools)
+
+  # Data wrangling & plotting
+  library(dplyr)
+  library(ggplot2)
+})
+```
+
+To identify which regions of the genome are being opened or closed across our conditions, we perform differential accessibility analysis on the consensus peak set. Regions that gain or lose accessibility point to regulatory elements being switched on or off.
+
+We use edgeR with a group-means parameterization on the four experimental groups (Ctrl_N, Ctrl_H, CC_N, CC_H) and define three contrasts to dissect the 2×2 design: Ctrl_H vs Ctrl_N captures the baseline hypoxia response in monoculture, CC_N vs Ctrl_N captures the baseline effect of glioma co-culture under normoxia, and CC_H vs CC_N isolates the effect of hypoxia specifically within the co-culture context. Together, these three tests let us separate the individual contributions of hypoxia and co-culture from that of hypoxia in co-culture.
+
+## Differential Accessibility Analysis with edgeR
+
+```{r}
+count_matrix <- readRDS("atac_count_matrix.rds")
+
+# Define groups based on the column names of atac_count_matrix 
+groups <- factor(c("Ctrl_N", "Ctrl_N", "Ctrl_H", "Ctrl_H", "CC_N", "CC_N", "CC_H", "CC_H"))
+
+# Initialize edgeR object, filter background noise, and normalize
+y <- DGEList(counts = count_matrix, group = groups)
+keep <- filterByExpr(y)
+y <- y[keep, , keep.lib.sizes=FALSE]
+y <- calcNormFactors(y)
+# cat("Total tested peaks:", sum(keep), "\n") # no peaks were filtered, as we filtered low quality reads earlier
+
+# Set up the statistical design of the differential analysis
+design <- model.matrix(~0 + groups)
+colnames(design) <- levels(groups)
+
+# Estimate variance (dispersion) and fit the model
+y <- estimateDisp(y, design)
+fit <- glmQLFit(y, design) # Quasi-Likelihood Negative Binomial
+
+# Define your exact 2x2 experimental questions
+my_contrasts <- makeContrasts(   
+  Ctrl_H_vs_Ctrl_N = Ctrl_H - Ctrl_N, # Baseline hypoxia response 
+  CC_N_vs_Ctrl_N  = CC_N - Ctrl_N,   # Baseline co-culture response
+  CC_H_vs_CC_N   = CC_H - CC_N,     # Hypoxia effect during co-culture
+  levels = design
+)
+
+# Run the tests for all 3 contrasts
+test1 <- glmQLFTest(fit, contrast=my_contrasts[,"Ctrl_H_vs_Ctrl_N"])
+cat("Contrast Ctrl_H_vs_Ctrl_N test has run \n")
+test2 <- glmQLFTest(fit, contrast=my_contrasts[,"CC_N_vs_Ctrl_N"])
+cat("Contrast CC_N_vs_Ctrl_N test has run \n")
+test3 <- glmQLFTest(fit, contrast=my_contrasts[,"CC_H_vs_CC_N"])
+cat("Contrast CC_H_vs_CC_N test has run \n")
+
+# Extract the significant tables for each
+diff_Ctrl_H_vs_Ctrl_N <- topTags(test1, n=Inf, p.value=1)$table
+diff_CC_N_vs_Ctrl_N <- topTags(test2, n=Inf, p.value=1)$table
+diff_CC_H_vs_CC_N <- topTags(test3, n=Inf, p.value=1)$table
+```
+
+The output of edgeR gives us, for every peak, a log2 fold change and an FDR-adjusted p-value describing how its accessibility shifts between the two conditions being contrasted. A volcano plot is the most compact way to visualize these results, showing effect size and statistical significance side by side. Below, we plot the log2 fold change against the -log10 FDR for each of the three contrasts, highlighting peaks that gain (red) or lose (blue) accessibility at \|logFC\| \> 0.6 and FDR \< 0.05.
+
+### Plot volcano plot of DA peaks
+
+```{r}
+plot_volcano <- function(df, plot_title) {
+  # Categorize each peak
+  df$Significance <- "Not Significant"
+  df$Significance[df$FDR < 0.05 & df$logFC > 0.6] <- "Up"
+  df$Significance[df$FDR < 0.05 & df$logFC < -0.6] <- "Down"
+  
+  # Plotting volcano
+  p <- ggplot(df, aes(x = logFC, y = -log10(FDR), color = Significance)) +
+    geom_point(alpha = 0.6, size = 1.2) +
+    scale_color_manual(values = c("Down" = "blue", "Not Significant" = "gray", "Up" = "red")) +
+    theme_minimal() +
+    labs(title = plot_title, x = "Log2 Fold Change", y = "-Log10 FDR") +
+    geom_vline(xintercept = c(-0.6, 0.6), linetype = "dashed") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed")
+  
+  print(p)
+  return(df)
+}
+
+# Call the function on each contrast
+diff_Ctrl_H_vs_Ctrl_N <- plot_volcano(diff_Ctrl_H_vs_Ctrl_N, "Hypoxia vs Normoxia in Monoculture")
+diff_CC_N_vs_Ctrl_N <- plot_volcano(diff_CC_N_vs_Ctrl_N, "Co vs Monocolture in Normoxia")
+diff_CC_H_vs_CC_N <- plot_volcano(diff_CC_H_vs_CC_N, "Hypoxia vs Normoxia in Co-Culture")
+```
+
+Beyond visualizing the distributions, we also count the number of significantly up- and down-regulated peaks in each contrast. This lets us directly compare how strongly each condition perturbs the chromatin landscape relative to the monoculture normoxia baseline.
+
+### Differential Accessibility counts
+
+```{r}
+count_sig <- function(df, name) {
+  up   <- sum(df$Significance == "Up")
+  down <- sum(df$Significance == "Down")
+  total <- sum(up, down)
+  cat(name, "— Up:", up, "| Down:", down, "| Total: ", total, "\n")
+}
+
+count_sig(diff_Ctrl_H_vs_Ctrl_N, "Ctrl_H vs Ctrl_N")
+count_sig(diff_CC_N_vs_Ctrl_N,   "CC_N vs Ctrl_N")
+count_sig(diff_CC_H_vs_CC_N,     "CC_H vs CC_N")
+```
+
+5.  WE CAN SEE THAT A LARGE NUMBER OF REGIONS SIGNIFICANTLY LOST/GAINED ACCESSIBILITY ACROSS ALL 3 CONDITONS. CO-CULTURE WITH GLIOMA CELLS SEEMS TO HAVE THE LEAST EFFECT ON ACCESSIBILITY AS ONLY 1,773 REGIONS BECOME DIFFERENTIALLY ACCESSIBLE IN CO-CULTURE NORMOXIA VS MONOCULTURE NORMXIA. HYPOXIA ALONE SEEMS TO HAVE A STRONGER EFFECT WITH 3409 DIFFERENTIALLY ACCESSIBLE REGIONS COMAPRED TO MONOCULTURE NORMoxia. FINALLY, THE COMBINATION OF BOTH SEEMS TO HAVE THE STRONGEST EFFECT WITH 7388 DA REGIONS. THIS INDICATES THAT WHILE HYPOXIA AND CO-CULTURE ALONE SIGNIFICANTLY CHANGE ACCESSIBILITY, THE EFFECT IS MUCH STRONGER WHEN BOTH STATES ARE COMBINED.
+
+BEYOND JUST FINDING WHICH PEAKS HAVE BECOME DIFFERENTIALLY ACCESSIBLE ACROSS CONDITIONS, WHERE WERE THESE PEAKS LOCATED IN THE GENOME? AND HOW COULD THEY POTENTIALLY HAVE BEEN AFFECTING TRANSCRIPTION? WE ANNOTATE THE DA REGIONS USING CHIPseeker.
+
+## Genomic Annotation Distribution Across Conditions
+
+```{r}
+txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
+consensus_peaks <- readRDS("atac_consensus.rds")
+get_granges_dir <- function(diff_table, consensus, direction) {
+  
+  if (direction == "up") {
+    sig_peaks <- rownames(diff_table)[diff_table$logFC > 0.6 & diff_table$FDR < 0.05]
+  } else {
+    sig_peaks <- rownames(diff_table)[diff_table$logFC < -0.6 & diff_table$FDR < 0.05]
+  }
+  
+  return(consensus[names(consensus) %in% sig_peaks])
+}
+
+gr_list <- list(
+  CC_Up      = get_granges_dir(diff_CC_N_vs_Ctrl_N, consensus_peaks, "up"),
+  CC_Down    = get_granges_dir(diff_CC_N_vs_Ctrl_N, consensus_peaks, "down"),
+  CC_Hyp_Up  = get_granges_dir(diff_CC_H_vs_CC_N, consensus_peaks, "up"),
+  CC_Hyp_Down= get_granges_dir(diff_CC_H_vs_CC_N, consensus_peaks, "down"),
+  Hyp_Up     = get_granges_dir(diff_Ctrl_H_vs_Ctrl_N, consensus_peaks, "up"),
+  Hyp_Down   = get_granges_dir(diff_Ctrl_H_vs_Ctrl_N, consensus_peaks, "down")
+)
+
+invisible(capture.output(anno_list <- lapply(gr_list, annotatePeak, tssRegion=c(-2000, 2000), TxDb=txdb, annoDb="org.Mm.eg.db")))
+plotAnnoBar(anno_list, title="Genomic Annotation Distribution (Up vs Down)")
+```
+
+7.  WE OBSERVE THAT PROMOTERS CONSISTENTLY APPEAR AS THE MOST PREVALENT GENOMIC REGULATORY ELEMENT IN ALL 3 CONDITONS, ACROSS BOTH UP AND DOWN REGULATION. SIMILARLY, A LARGE PRORTION OF DAs CONSISTENTLY, ALTHOUGH TO A LOWER EXTENT, FALL IN DISTAL INTERGENIC REGIONS. TO CHECK THE EFFECT OF DISTAL INTERGENIC REGIONS AND THAT OF GENIC REGIONS (PROMOTER+INTRON+EXON+UTR) EXCLUSIVELY, WE SEPARATE THE TWO TYPES OF PEAK REGIONS AND INVESTIGATE THOSE PRIMARILY. THIS WOULD ALLOW US TO EXPLROE DIFFERNT TYPE OF GENE REGULATION THAN THE ONES EXPLORED EXCLUSIVELY IN THE PAPER(ONLY PROMOTER AND GENIC)
+
+8.  BUT BEFORE, AS WE OBSERVED THAT THE COMBINATION OF THE TWO STATES SEEMED TO HAVE THE STRONGEST EFFECT ON DIFFERENTIAL ACCESSIBILTY, HOW MANY OF THOSE REGIONS WERE SPECIFICALLY OPENING UP WHEN BV2 CELLS WERE PLACED SPECIFICALLY UNDER BOTH CONDITIONS, AND NOT UNDER EACH CONDITION ALONE? FOR THAT, A VEEN DIAGRAM WAS PLOTTED.
+
+## CC + Hyp peaks
+
+### Venn diagram plot
+
+```{r}
+# passing the original DGELRT objects
+results_mat <- cbind(
+  Ctrl_H_vs_Ctrl_N = decideTests(test1, p.value = 0.05, lfc = 0.6),
+  CC_N_vs_Ctrl_N     = decideTests(test2, p.value = 0.05, lfc = 0.6),
+  CC_H_vs_CC_N   = decideTests(test3, p.value = 0.05, lfc = 0.6)
+)
+
+par(mar = c(4, 4, 8, 4), cex = 0.7)  # Increase top margin, shrink text
+vennDiagram(results_mat, 
+            include = c("up", "down"), 
+            counts.col = c("blue", "red"),
+            circle.col = c("green", "purple", "red"),
+            main = "All conditions overlap", 
+            cex.main = 2.5) 
+```
+
+8.  EXPLAIN THAT WE CAN SEE THAT MANY REGIONS ARE ONLY DIFFERENTIALLY ACCESSIBLE IN HYPOXIA IN COCOLTURE, WITH VERY LITTLE OVERLAP BETWEEN ALL 3 GROUPS OF DIFFERENTIALLY ACCESSIBILE REGIONS. THIS INDICATES THAT THE COMBINED EFFECT OF HYPOXIA IN COCULTURE HAS A LARGE EFFECT ON ACCESSIBILITY AND THAT THESE ARE THE REGIONS THAT COULD EXPLAIN THE PHENOTYPE OBSERVED IN MICRGLIAL CELLS IN GLIOMA. (small note: the numbers observed in the venn diagram are different from those observed in figure 5C in the paper as the authors of the paper exclusively plot PROMOTER regions).
+
+THEN AS THE ANALYSIS PROCEDES, WE SUBSET OUR DA REGIONS TO ONLY THOSE THAT ARE DIFFERENTIALLY ACCESSIBLE IN CC + HYPOXIA. WE FURTHER SEPARATE THIS GROUP INTO DISTAL INTERGENIC AND GENIC PEAKS.
+
+### Peaks Unique to CC+Hypoxia
+
+```{r}
+# Get significant peak IDs for each contrast (FDR < 0.05, |logFC| >= 0.6)
+get_sig_ids <- function(diff_table, direction = c("up", "down")) {
+  direction <- match.arg(direction)
+  if (direction == "up") {
+    rownames(diff_table)[diff_table$Significance == "Up"]
+  } else {
+    rownames(diff_table)[diff_table$Significance == "Down"]
+  }
+}
+
+# Up peaks per contrast
+ids_Hyp_up    <- get_sig_ids(diff_Ctrl_H_vs_Ctrl_N, "up")
+ids_CC_up     <- get_sig_ids(diff_CC_N_vs_Ctrl_N,   "up")
+ids_CCHyp_up  <- get_sig_ids(diff_CC_H_vs_CC_N,     "up")
+
+# Down peaks per contrast
+ids_Hyp_down   <- get_sig_ids(diff_Ctrl_H_vs_Ctrl_N, "down")
+ids_CC_down    <- get_sig_ids(diff_CC_N_vs_Ctrl_N,   "down")
+ids_CCHyp_down <- get_sig_ids(diff_CC_H_vs_CC_N,     "down")
+
+# Exclusive to CC+Hyp: in CCHyp but NOT in Hyp alone and NOT in CC alone
+comb_up   <- setdiff(ids_CCHyp_up,   union(ids_Hyp_up,   ids_CC_up))
+comb_down <- setdiff(ids_CCHyp_down, union(ids_Hyp_down, ids_CC_down))
+
+cat("Combination effect peaks — Up:", length(comb_up), "| Down:", length(comb_down), "\n")
+
+# Map to GRanges
+gr_comb_up   <- consensus_peaks[names(consensus_peaks) %in% comb_up]
+gr_comb_down <- consensus_peaks[names(consensus_peaks) %in% comb_down]
+```
+
+9.  FOR SIMPLICITY, WE ASSUME IN THIS ANALYSIS THAT DISTAL INTERGENIC REGIONS ARE MOSTLY ENHANCERS. WHILE WE ARE AWARE THAT DISTAL INTERGENIC REGIONS ARE NOT EXCLUSIVELY ENHANCERS, AS THE CATEGORY ALSO INCLDUES insulators/boundary elements and other regulatory DNA, H3K27AC PEAKS WERE LATER OVERLAYED ON TO CONFIRM THE PRESENCE OF THE HISTONE MARK, ON POTENTIAL ENHANCER REGIONS. WE ARE ALSO AWARE THAT ENHANCERS CAN FALL IN INTRONIC AND EVEN EXONIC REGIONS (WHICH WERE EXCLUSIVELY CONSIDERED AS GENIC REGIONS). HOWEVER, AS THE GOAL OF DOWNSTREAM ANALYSES ISNT TO COMPARE GENIC VS ENHANCERS, BUT RATHER TO INVESTIGATE THE SAME REGION INVESTIGATED BY THE PAPER (GENIC), BUT ALSO OTHER REGIONS THAT THE PAPER FOCUSED LESS ON (DISTAL INTERGENIC) TO TRY TO FIND NEW INSIGHTS TO the remodeling of these distal regulatory elements that could dictate the long-term phenotypic rewriting of the cell.
+
+### Combination Peak Candidates Extraction (Genic and Distal Intergenic)
+
+```{r}
+# Annotate synergistic peaks
+invisible(capture.output({
+  anno_comb_up   <- annotatePeak(gr_comb_up,   tssRegion=c(-2000,2000), TxDb=txdb, annoDb="org.Mm.eg.db")
+  anno_comb_down <- annotatePeak(gr_comb_down, tssRegion=c(-2000,2000), TxDb=txdb, annoDb="org.Mm.eg.db")
+}))
+
+df_comb_up   <- as.data.frame(anno_comb_up)
+df_comb_down <- as.data.frame(anno_comb_down)
+
+# Extract genic peaks
+genic_up   <- df_comb_up[grepl("Promoter|Exon|Intron|UTR", df_comb_up$annotation), ]
+genic_down <- df_comb_down[grepl("Promoter|Exon|Intron|UTR", df_comb_down$annotation), ]
+
+cat("Combination genic candidates — Up:", nrow(genic_up), "| Down:", nrow(genic_down), "\n")
+
+# Extract distal intergenic peaks
+enh_up   <- df_comb_up[grepl("Distal Intergenic", df_comb_up$annotation), ]
+enh_down <- df_comb_down[grepl("Distal Intergenic", df_comb_down$annotation), ]
+
+cat("Combination enhancer candidates — Up:", nrow(enh_up), "| Down:", nrow(enh_down), "\n")
+```
+
+10. AFTER HAVING SEPARATED GENIC FROM ENHANCER REGIONS, AND SELECTING EXCLUSIVELY FOR PEAKS THAT SOLELY ARISE FROM THE COMBINATORIAL EFFECT OF HYPOXIA + CC, WE WERE INTERESTED IN KNOWING WHAT BIOLOGICAL PROCESSES WERE ASSOCIATED WITH THESE GENIC AND ENHANCER PEAKS. EXPLAIN THAT FIRST FOR GENIC WE EXTRACTED THE GENES THAT THE GENIC REGIONS WERE ASSOCIATED WITH AND RAN erichGO from the Clusterprofiler package. THE BAKCGROUND WAS SET AS ALL CONSENSUS PEAKS IN OUR DATASET.
+
+## ORA on Combination Genic Candidates
+
+```{r, fig.height= 8, fig.width=9}
+
+# Extract nearest gene symbols
+genes_genic_up   <- unique(genic_up$SYMBOL[!is.na(genic_up$SYMBOL)])
+genes_genic_down <- unique(genic_down$SYMBOL[!is.na(genic_down$SYMBOL)])
+
+# Background: all genes in the consensus peak universe
+ invisible(capture.output(
+  anno_consensus <- annotatePeak(consensus_peaks, tssRegion=c(-2000,2000), TxDb=txdb, annoDb="org.Mm.eg.db")
+ ))
+ df_consensus <- as.data.frame(anno_consensus)
+ background_genes <- unique(df_consensus$SYMBOL[!is.na(df_consensus$SYMBOL)])
+
+# ORA
+go_genic_up <- enrichGO(
+  gene          = genes_genic_up,
+  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2
+)
+
+go_genic_down <- enrichGO(
+  gene          = genes_genic_down,
+  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2
+)
+
+# Plot
+dotplot(go_genic_up,   showCategory=15) + ggtitle("GO BP — Combination Genic Candidates (Up)")
+dotplot(go_genic_down, showCategory=15) + ggtitle("GO BP — Combination Genic Candidates (Down)")
+```
+
+### ORA Genic (Consensus Background)
+
+#### Genic Up ORA Analysis (Consensus Background)
+
+At first glance, the ORA results for the genic up regions were confusing, since they were dominated by neuronal terms like postsynapse organization and dendrite development. To make sense of this, we looked directly at the genes driving these terms.
+
+```{r}
+# Look up a term and its genes from a clusterProfiler enrichResult
+
+get_term_genes <- function(ego, term, readable = TRUE) {
+  df <- as.data.frame(ego)
+  # match on description (case-insensitive, partial)
+  hit <- df[grepl(term, df$Description, ignore.case = TRUE), ]
+  if (nrow(hit) == 0) {
+    message("No term matching: ", term)
+    return(invisible(NULL))
+  }
+  for (i in seq_len(nrow(hit))) {
+    cat("\n", hit$ID[i], "—", hit$Description[i],
+        "\n  p.adjust:", signif(hit$p.adjust[i], 3),
+        "| Count:", hit$Count[i], "\n  Genes: ")
+    cat(gsub("/", ", ", hit$geneID[i]), "\n")
+  }
+  invisible(hit)
+}
+```
+
+```{r}
+get_term_genes(go_genic_up, "postsynapse organization")
+get_term_genes(go_genic_up, "dendrite development")
+```
+
+The genes behind postsynapse organization and dendrite development were largely the same, and most belonged to the Rho-GTPase/actin-remodeling machinery (Rac1, Dock10, Prex1, Abi1, Abi2, Elmo1, Pak2, Iqgap1, Arhgap33, Arhgap12, Srgap2, Myh10, Baiap2, Cyfip2, Dbnl). Notably, this set contained both activators of actin remodeling (the Rac1 GEFs Prex1, Dock10, and Elmo1) and repressors (the Rac1/Cdc42 GAPs Arhgap12, Arhgap33, and Srgap2).
+
+```{r}
+get_term_genes(go_genic_up, "purine nucleotide catabolic process")
+```
+
+The purine nucleotide catabolic process term was driven mostly by core components of the Hypoxia-Inducible Factor 1 (HIF-1) transcriptional complex, including HIF-1β (Arnt) and several glycolytic enzymes (Aldoa, Eno1, Pkm, Hk1), pointing to a metabolic shift toward glycolysis under low oxygen.
+
+```{r}
+get_term_genes(go_genic_up, "amyloid-beta metabolic process")
+get_term_genes(go_genic_up, "amyloid-beta formation")
+```
+
+The two amyloid-beta terms reflected a mix of genes which relate to microglial uptake and lipoprotein handling (Abca7, Lrp1, Ldlr, Sorl1, Clu) and inflammatory genes (Tnf, Rela, Ifngr1). Beyond inflammation, this points towards a reprogramming towards lipid uptake, as many are lipoprotein receptors and transporters that govern the uptake and efflux of lipid-laden particles, a phenomenon captured and emphasized by the authors of the paper.
+
+Looking closer at the genes behind these terms gave a clearer image of the underlying process. These regions point to a coordinated remodeling of the actin cytoskeleton, a transcriptional response to hypoxia, and an active inflammatory program. This is consistent with microglia adapting to the hypoxic, tumor-shaped environment.
+
+#### Genic Down ORA Analysis (Consensus Background)
+
+No enriched terms were observed for the differentially accessible genic down regions.
+
+### ORA Enhancer (Consensus Background)
+
+Having characterized the genic regions, we applied the same approach to the enhancer regions.
+
+```{r, fig.height= 8, fig.width=9}
+# Extract nearest gene symbols
+genes_enh_up   <- unique(enh_up$SYMBOL[!is.na(enh_up$SYMBOL)])
+genes_enh_down <- unique(enh_down$SYMBOL[!is.na(enh_down$SYMBOL)])
+
+# ORA
+go_enh_up <- enrichGO(
+  gene          = genes_enh_up,
+  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+go_enh_down <- enrichGO(
+  gene          = genes_enh_down,
+  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# Plot
+dotplot(go_enh_up,   showCategory=15) + ggtitle("GO BP — Combination Enhancer Candidates (Up)")
+dotplot(go_enh_down, showCategory=15) + ggtitle("GO BP — Combination Enhancer Candidates (Down)")
+```
+
+#### Enhancer Up ORA Analysis (Consensus Background)
+
+No enriched terms were observed for the differentially accessible enhancer up regions.
+
+### Enhancer Down ORA Analysis (Consensus Background)
+
+For the enhancer-down regions, most of the enriched terms (cardiac, blood vessel, tube diameter, catecholamine, and fat cell terms) were driven by a shared set of genes encoding G-protein-coupled receptors (GPCRs) and related signaling components. Because GPCRs are a broad, non-specific receptor family reused across many cell types, these genes carry GO annotations biased toward the tissues where they were first characterized (heart, vasculature, adipose), producing a series of anatomically-labeled but largely redundant terms. Printing the genes behind regulation of tube size illustrates this clearly:
+
+```{r}
+get_term_genes(go_enh_down, "regulation of tube size")
+```
+
+```{r}
+get_term_genes(go_enh_down, "lamellipodium assembly")
+```
+
+The one clearly interpretable term was lamellipodium assembly, driven by genuine actin-protrusion machinery (Actr3, Vav3,Nck2, and Itgb1), pointing to a potential loss of accessibility at enhancers controlling the amoeboid, protrusive motility that underlies microglial surveillance.
+
+Using all consensus peaks as the ORA background, very few terms reached significance, and the enhancer-up and genic-down sets returned none, even under more lenient q-value thresholds.
+
+To explore whether any biological signal was nonetheless present in these sets, we re-ran enrichGO against all annotated mouse genes as background. This recovered substantially more significant terms, several of which aligned with known microglial responses in glioblastoma and hypoxia. We want to be explicit that this is not a statistically valid substitution, and we do not treat it as confirmatory. The genes associated with the peaks are more/less accessible than expected relative to the chromatin actually open in this experiment. With all mouse genes as background, it instead asks whether these genes associated with are enriched relative to the entire annotated genome, the majority of which corresponds to tissues, cell types, and conditions that could never realistically yield a peak in our microglial ATAC-seq assay. This guarantees inflated enrichment.
+
+We therefore report the whole-genome-background terms only as exploratory, not as statistically supported findings.
+
+### ORA Genic (Whole Genome Background)
+
+```{r, fig.height=8, fig.width=9}
+
+go_genic_up <- enrichGO(
+  gene          = genes_genic_up,
+#  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+go_genic_down <- enrichGO(
+  gene          = genes_genic_down,
+#  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# Plot
+dotplot(go_genic_up,   showCategory=15) + ggtitle("GO BP — Combination Genic Candidates (Up)")
+dotplot(go_genic_down, showCategory=15) + ggtitle("GO BP — Combination Genic Candidates (Down)")
+```
+
+#### Genic UP ORA analysis (Whole Genome Background)
+
+Many of the enriched Genic UP terms relate to proteostasis (regulation of protein stability, regulation of protein catabolic process, etc.), and a second cluster relates to DNA damage and apoptotic signaling (double-strand break repair, response to radiation, etc.). The dominant theme here is stress adaptation and proteostatic maintenance, which could be a response to misfolded protein accumulation under hypoxia. The DNA damage and apoptotic cluster reflects genomic stress, potentially due to low oxygen.
+
+##### Genic DOWN ORA analysis (Whole Genome Background)
+
+Many of the enriched terms in the Genic DOWN ORA relate to cytoskeleton and actin remodeling (actin filament organization, regulation of actin cytoskeleton organization), and a second group relates to endocytosis (positive regulation of endocytosis). Both processes are central to what microglia do in a healthy brain: actin remodeling drives their constant movement, while endocytosis lets them sample their surroundings and present antigen.
+
+Note: Small GTPase "small GTPase–mediated signal transduction" is the top term in both the genic-up and genic-down sets. To investigate this we extract the genes that contribute to the GO enriched term.
+
+```{r}
+get_term_genes(go_genic_down, "small GTPase-mediated signal transduction")
+get_term_genes(go_genic_up, "small GTPase-mediated signal transduction")
+```
+
+The same GO term, small GTPase-mediated signal transduction, was significantly enriched in both the genic-up and genic-down sets. At a deeper glance, the two sets share only a few genes (5 specifically), meaning they are driven by by distinct populations of GTPase-pathway genes. Both lists contain a mix of opposing regulators: activators such as GEFs (e.g. Dock and Tiam family members) alongside inactivators such as GAPs (e.g. the Arhgap family). This coudl indicate that the small-GTPase signaling module is being actively restructured rather than uniformly switched on or off.
+
+### ORA Up (Whole Genome Background)
+
+```{r, fig.height= 8, fig.width=9}
+
+# ORA
+go_enh_up <- enrichGO(
+  gene          = genes_enh_up,
+#  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+go_enh_down <- enrichGO(
+  gene          = genes_enh_down,
+#  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# Plot
+dotplot(go_enh_up,   showCategory=15) + ggtitle("GO BP — Combination Enhancer Candidates (Up)")
+dotplot(go_enh_down, showCategory=15) + ggtitle("GO BP — Combination Enhancer Candidates (Down)")
+```
+
+#### Enhancer UP ORA analysis (Whole Genome Background)
+
+Several enriched Enhancer UP terms relate to mesenchymal identity (mesenchyme development, mesenchymal cell differentiation), suggesting GAMs could be acquiring mesenchymal-like traits, potentially the capacity to secrete and remodel extracellular matrix that scaffolds tumor invasion. A second group relates to adhesion (leukocyte cell-cell adhesion, cell adhesion mediated by integrin, etc.). This could point to cells gaining programs for sticking to ECM and to each other, with a potential shift toward a stationary, anchored state. A third cluster (cellular response to chemical stress, and reactive oxygen species, etc.) mirrors the stress-adaptation signature seen in previous up sets, which indicates a survival response under hypoxia and ROS. Finally, the inflammatory terms (regulation of inflammatory response, negative regulation of cytokine production) indicate towards both immunosuppression and inflammation, as, on a closer look at the regulation of inflammatory response, shows a rough balance between activators and suppressors.
+
+```{r}
+get_term_genes(go_enh_up, "regulation of inflammatory response")
+```
+
+#### Enhancer DOWN ORA analysis (Whole Genome Background)
+
+The clearest signal in the enhancer-down set is the loss of motility machinery: amoeboidal-type cell migration, lamellipodium assembly, and lamellipodium organization. These reinforce the enhancer down results with the consensus background which showed similarly a decrease in lamellipodium assembly.
+
+## TF Motif Enrichment on Combination Peaks
+
+The ORA above tells us which and programs are enriched based on the remodeling of peaks, but not which transcription factors' binding might be being regulated. To find that, we scan the differentially accessible peaks for enriched TF binding motifs, pointing towards the regulators whose binding sites are over-represented in those regions.
+
+```{r}
+quantile(width(consensus_peaks))
+```
+
+Given the spread of peak widths, we resize all peaks to a fixed 200 bp window centered on each peak's midpoint. This is below the minimum observed width, and ensures every peak contributes a uniform-sized region to the motif enrichment analysis rather than letting wider peaks dominate.
+
+MAYBE EXPLAIN A BIT THE CODE
+
+```{r}
+genome <- BSgenome.Mmusculus.UCSC.mm10
+
+# Get mouse HOCOMOCOv10 motifs from MotifDb and convert to the PWMatrixList format motifmatchr expects
+motifs_mdb <- query(MotifDb, c("Mmusculus", "HOCOMOCOv10"))
+motifs <- do.call(PWMatrixList, convert_motifs(motifs_mdb, class = "TFBSTools-PWMatrix"))
+
+# HOCOMOCO has multiple motif versions per TF, so name(motifs) has duplicates.
+# For that, we use make.unique() so downstream factor()/data.frame row labels don't collide
+motif_names_unique <- make.unique(name(motifs))
+names(motifs) <- motif_names_unique
+
+# Function to run motif enrichment
+# For each motif, compare its hit rate in foreground vs background peaks via Fisher's exact test
+run_motif_enrichment <- function(foreground_gr, background_gr, genome, motifs, label, peak_width = 200) {
+
+  # Standardize all regions to a fixed width around their center
+  # (keeps peak-length bias out of the comparison. fg and bg are scored on equal-sized windows)
+  fg_centered <- resize(foreground_gr, fix = "center", width = peak_width)
+  bg_centered <- resize(background_gr, fix = "center", width = peak_width)
+
+  # Get match matrices: rows = peaks, cols = motifs, values = TRUE/FALSE for a match
+  # bg = "even": score fg and bg against the SAME (uniform) composition model, so the
+  # only thing differing between the two sets is the sequences, not the score calibration
+  fg_mat <- motifMatches(matchMotifs(motifs, fg_centered, genome = genome))
+  bg_mat <- motifMatches(matchMotifs(motifs, bg_centered, genome = genome))
+
+  results <- data.frame(
+    motif    = names(motifs),  # de-duplicates labels
+    motif_id = ID(motifs)
+  )
+
+  fg_n <- nrow(fg_mat)
+  bg_n <- nrow(bg_mat)
+
+  # One-sided ("greater") because we only care about ENRICHMENT in the foreground, not depletion
+  results$pvalue <- sapply(seq_along(motifs), function(i) {
+    fg_hit <- sum(fg_mat[, i])
+    fg_miss <- fg_n - fg_hit
+    bg_hit <- sum(bg_mat[, i])
+    bg_miss <- bg_n - bg_hit
+    fisher.test(matrix(c(fg_hit, fg_miss, bg_hit, bg_miss), nrow=2),
+                alternative = "greater")$p.value
+  })
+
+  results$padj <- p.adjust(results$pvalue, method = "BH")
+  results$fg_pct <- colSums(fg_mat) / fg_n * 100
+  results$bg_pct <- colSums(bg_mat) / bg_n * 100
+
+  # Fold enrichment with +1 pseudocounts to avoid divide-by-zero / unstable ratios on rare motifs
+  results$fold_enrichment <- ((colSums(fg_mat) + 1) / (fg_n + 1)) /
+                              ((colSums(bg_mat) + 1) / (bg_n + 1))
+
+  results <- results[order(results$padj), ]
+  cat(label, "— fg:", fg_n, "| bg:", bg_n,
+      "| significant motifs (FDR < 0.05):", sum(results$padj < 0.05), "\n")
+  return(results)
+}
+
+plot_motifs <- function(results, title, n=15) {
+  top <- head(results[results$padj < 0.05, ], n)
+  if (nrow(top) == 0) { message("No significant motifs for: ", title); return(invisible(NULL)) }
+  top$motif <- factor(top$motif, levels = rev(top$motif))
+  ggplot(top, aes(x = fold_enrichment, y = motif, fill = -log10(padj))) +
+    geom_bar(stat = "identity") +
+    scale_fill_gradient(low = "lightblue", high = "darkred") +
+    labs(title = title, x = "Fold Enrichment", y = "", fill = "-log10(FDR)") +
+    theme_minimal()
+}
+
+# Foreground sets (unchanged)
+peak_sets <- list(
+  "Enhancer Up"   = makeGRangesFromDataFrame(enh_up,     keep.extra.columns=TRUE),
+  "Enhancer Down" = makeGRangesFromDataFrame(enh_down,   keep.extra.columns=TRUE),
+  "Genic Up"      = makeGRangesFromDataFrame(genic_up,   keep.extra.columns=TRUE),
+  "Genic Down"    = makeGRangesFromDataFrame(genic_down, keep.extra.columns=TRUE)
+)
+
+# ── Compartment-matched background ────────────────────────────────────────────
+# Test each foreground against non-DA peaks of its OWN compartment: enhancer
+# foregrounds vs other distal-intergenic peaks, genic foregrounds vs other genic
+# peaks. This stops the GC-rich genic motifs (SP/KLF/NF-Y) from looking enriched
+# just because the pooled background was diluted with low-GC enhancer peaks.
+#
+# Reuse df_consensus from the ORA chunk (annotatePeak on consensus_peaks) and the
+# SAME grepl() rules used to build enh_/genic_ at the candidate-extraction step.
+comb_ids <- union(comb_up, comb_down)
+
+# non-DA consensus peaks, annotated exactly as the foregrounds were
+nonDA_ids   <- setdiff(rownames(df_consensus), comb_ids)
+df_nonDA    <- df_consensus[rownames(df_consensus) %in% nonDA_ids, ]
+
+bg_enh_df   <- df_nonDA[grepl("Distal Intergenic", df_nonDA$annotation), ]
+bg_genic_df <- df_nonDA[grepl("Promoter|Exon|Intron|UTR", df_nonDA$annotation), ]
+
+bg_enh   <- makeGRangesFromDataFrame(bg_enh_df,   keep.extra.columns=TRUE)
+bg_genic <- makeGRangesFromDataFrame(bg_genic_df, keep.extra.columns=TRUE)
+
+# one background per foreground, matched by compartment
+bg_sets <- list(
+  "Enhancer Up"   = bg_enh,
+  "Enhancer Down" = bg_enh,
+  "Genic Up"      = bg_genic,
+  "Genic Down"    = bg_genic
+)
+
+motif_results <- lapply(names(peak_sets), function(label) {
+  run_motif_enrichment(peak_sets[[label]], bg_sets[[label]], genome, motifs, label)
+})
+names(motif_results) <- names(peak_sets)
+```
+
+```{r}
+for (label in names(motif_results)) {
+  print(plot_motifs(motif_results[[label]], paste("TF Motifs —", label)))
+}
+```
+
+#### Enhancer UP Enriched Motifs Analysis
+
+At gained enhancers, the dominant motifs are AP-1 (FOSL1/2, JUN, JUNB/D, BATF) and NF-κB (NFKB1). These are the two master inflammatory signal-responsive modules: AP-1 is the immediate-early effector downstream of stress and MAPK signalling, and NF-κB the central transcriptional hub of myeloid inflammatory activation. Their enhancers opening together marks the cells switching on a stress-driven activation programme — and in this tumour context, an AP-1/NF-κB programme that is immunomodulatory and tumour-supportive rather than productively anti-tumoral.
+
+#### Enhancer DOWN Enriched Motifs Analysis
+
+At lost enhancers, the signal is led robustly by SPI1 (PU.1) and SPIB. PU.1 is the lineage-determining pioneer factor that establishes and maintains the entire microglial/myeloid enhancer landscape; loss of accessibility at its sites therefore means the cells are dismantling the core regulatory program that defines microglial identity itself. SPIB closing alongside it reinforces that this is a coordinated withdrawal of PU.1-family ETS regulation from these enhancers.
+
+Because these changes occur at potential enhancers, which encode and maintain cell identity, they could imply a more durable reconfiguration than a transient hypoxic response. Opening stress/activation enhancers while closing PU.1-dependent identity enhancers points to the cells rewiring the regulatory architecture that defines what they are, suggesting a longer-term phenotypic rewriting of these GAMs toward an activated, immunosuppressed state.
+
+#### Genic UP Enriched Motifs Analysis
+
+Analysis of the genic upregulated regions reveals enrichment across the Sp/KLF family — SP1, SP2, SP3, SP4 and KLF4 — together with the nuclear transcription factor Y subunits (NFYB, NFYA, NFYC). The Sp factors and NF-Y are general regulators of active, promoter-proximal transcription, so much of this signal reflects promoters switching on broad survival and stress-response pathways under hypoxia. KLF4 is the more informative hit, as it specifically drives microglial polarization and acts as a switch that pushes these cells out of a resting state into a stress-adapted, tumour-supportive one. This promoter-level activation works in parallel with the changes seen at distal enhancers. There, accessibility increases at AP1 and NFKB motifs, the immediate-early effectors of stress and inflammatory signaling, marking the gain of an activated, immunomodulatory program. At the same time, the master microglial lineage regulators SPI1 and SPIB lose accessibility at these enhancers, marking the loss of homeostatic identity. Read together, the two layers describe the same transition from both directions: an activation and polarization program opening (KLF4 at promoters, AP1 and NFKB at enhancers) while the core microglial identity program closes (SPI1 and SPIB).
+
+#### Genic DOWN Enriched Motifs Analysis
+
+No enriched motifs were observed for the genic down regions.
+
+Together, these motif results reinforce what our ORA analysis showed. The gain of stress-responsive and inflammatory programs at AP1 and NFKB enhancers mirrors the increased stress response and inflammation seen in the enriched terms. More importantly, the loss of SPI1 and SPIB accessibility provides a regulatory explanation for the functional changes in the genic up and enhancer down ORA (with consensus background): the active remodeling of the cytoskeleton and the decrease in lamellipodium assembly. As PU.1 maintains the microglial identity program, the closing of its enhancers is consistent with cells dismantling the actin-driven motility and surveillance machinery that defines homeostatic microglia. The two analyses therefore converge on the same conclusion from different angles, a major loss of homeostatic microglial function in favor of an activated, tumour-supportive state.
+
+MAYBE ADD, IT JUST CONFIRMS NO GC BIAS.
+
+```{r}
+gc_of <- function(gr) {
+  seqs <- getSeq(genome, resize(gr, width = 200, fix = "center"))
+  letterFrequency(seqs, "GC", as.prob = TRUE)[,1]
+}
+
+cat("Genic Down foregroud:\n")
+summary(gc_of(peak_sets[["Genic Down"]]))
+cat("Genic Up foregroud:\n")
+summary(gc_of(peak_sets[["Genic Up"]]))
+cat("Genic backgroud:\n")
+summary(gc_of(bg_sets[["Genic Down"]]))
+
+
+cat("Enhancer Down foregroud:\n")
+summary(gc_of(peak_sets[["Enhancer Down"]]))
+cat("Enhancer Up foregroud:\n")
+summary(gc_of(peak_sets[["Enhancer Up"]]))
+cat("Enhancer backgroud:\n")
+summary(gc_of(bg_sets[["Enhancer Down"]]))
+
+```
